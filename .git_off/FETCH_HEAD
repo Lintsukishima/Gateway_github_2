@@ -1,0 +1,5 @@
+e59297eac8428076e5e4f7d00b53e963b992e917		branch 'master' of github.com:Lintsukishima/gateway
+e7e7cc69e3ead86ab61a5de69b578471e4aa81ed	not-for-merge	branch 'codex/implement-score_final-computation-function' of github.com:Lintsukishima/gateway
+3ce8a0d785d97cdb3c00398b4f6e0a06b08e1480	not-for-merge	branch 'codex/update-gateway_ctx-response-format' of github.com:Lintsukishima/gateway
+36362de54cc62bd244965cb02ce197a1f7f9cc6a	not-for-merge	branch 'codex/update-openai-proxy-summary-injection-process' of github.com:Lintsukishima/gateway
+038aa430c7adac86f74370963f749631ca93f0a9	not-for-merge	branch 'main' of github.com:Lintsukishima/gateway

@@ -1,0 +1,12 @@
+.env
+__pycache__/
+.pyc
+.pyo
+gateway.db
+*.pyc
+*.pyo
+*.sqlite
+*.log
+response.json
+recover/
+gateway _recover/
