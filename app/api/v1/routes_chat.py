@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session as OrmSession
 from app.db.session import SessionLocal
 from app.schemas.chat import ChatRequest, ChatResponse
-from app.services.chat_service import chat_once
+from app.services.chat_service import append_user_and_assistant
 
 router = APIRouter()
 
@@ -15,11 +15,13 @@ def get_db():
 
 @router.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, db: OrmSession = Depends(get_db)):
-    session_id, turn_id, reply = chat_once(
+    result = append_user_and_assistant(
         db=db,
         session_id=req.session_id,
-        user_id=req.user_id,
-        user_text=req.message,
-        meta=req.meta,
+        user_text=req.user_text,
+        assistant_text=req.assistant_text,
     )
-    return ChatResponse(session_id=session_id, turn_id=turn_id, reply=reply)
+    return ChatResponse(
+        session_id=result.session_id,
+        turn_id=result.assistant_message_turn_id,
+    )
