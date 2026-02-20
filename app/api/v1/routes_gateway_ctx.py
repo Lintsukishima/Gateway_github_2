@@ -32,6 +32,13 @@ SUPPORTED_VERSIONS = {
 CTX_MAX = int(os.getenv("ANCHOR_SNIP_MAX", "400"))
 GATEWAY_CTX_DEBUG = os.getenv("GATEWAY_CTX_DEBUG", "0").strip().lower() in ("1", "true", "yes")
 DIFY_TIMEOUT_SECS = float(os.getenv("DIFY_TIMEOUT_SECS", "30"))
+RETRIEVAL_TOP_N = int(os.getenv("RETRIEVAL_TOP_N", "3"))
+
+RETRIEVAL_PROFILE_VERSION = "v1.0.0"
+W_KEYWORD = 0.40
+W_VECTOR = 0.40
+W_RECENCY = 0.10
+W_TYPE = 0.10
 
 # 关键词乱码修复开关：当 keyword 里大部分都是 '?' 时，优先用 text 重新推导中文关键词（而不是直接走撒娇/猫咪兜底）
 GARBLED_KW_REPAIR_ENABLED = os.getenv("GARBLED_KW_REPAIR_ENABLED", "1").strip().lower() in ("1", "true", "yes")
@@ -179,6 +186,135 @@ def _build_gateway_evidence(primary_keyword: str, primary_text: str, fallback_ke
     return evidence
 
 
+def _safe_float(v: Any, default: float = 0.0) -> float:
+    try:
+        return float(v)
+    except Exception:
+        return default
+
+
+def _type_boost(source_type: str) -> float:
+    if source_type in ("keyword", "vector"):
+        return 1.0
+    return 0.6
+
+
+def _recency_score(ts: int) -> float:
+    if not ts:
+        return 0.0
+    age = max(0, int(time.time()) - int(ts))
+    day = 86400
+    if age <= day:
+        return 1.0
+    if age <= 7 * day:
+        return 0.8
+    if age <= 30 * day:
+        return 0.6
+    return 0.3
+
+
+def _adapt_keyword_candidates(raw_candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    unified: List[Dict[str, Any]] = []
+    now_ts = int(time.time())
+    for idx, item in enumerate(raw_candidates):
+        score = _safe_float(item.get("score"), 1.0)
+        unified.append(
+            {
+                "id": item.get("id") or f"kw_{idx}",
+                "source_type": "keyword",
+                "source_id": item.get("source_id") or item.get("keyword") or "",
+                "text": item.get("text") or "",
+                "chunk_id": item.get("chunk_id") or "",
+                "metadata": item.get("metadata") or {},
+                "reason": item.get("reason") or "keyword_hit",
+                "ts": int(item.get("ts") or now_ts),
+                "score_raw": {
+                    "keyword": score,
+                    "vector": 0.0,
+                },
+            }
+        )
+    return unified
+
+
+def _adapt_vector_candidates(raw_candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    unified: List[Dict[str, Any]] = []
+    now_ts = int(time.time())
+    for idx, item in enumerate(raw_candidates):
+        if not isinstance(item, dict):
+            continue
+        doc_id = str(item.get("doc_id") or item.get("document_id") or item.get("id") or "")
+        chunk_id = str(item.get("chunk_id") or item.get("segment_id") or "")
+        text = str(item.get("text") or item.get("content") or "")
+        score = _safe_float(item.get("score"), 0.0)
+        unified.append(
+            {
+                "id": f"vec_{idx}",
+                "source_type": "vector",
+                "source_id": doc_id,
+                "text": text,
+                "chunk_id": chunk_id,
+                "metadata": item.get("metadata") or {},
+                "reason": item.get("reason") or "vector_hit",
+                "ts": int(item.get("ts") or now_ts),
+                "score_raw": {
+                    "keyword": 0.0,
+                    "vector": score,
+                },
+            }
+        )
+    return unified
+
+
+def _score_and_rank_candidates(candidates: List[Dict[str, Any]], top_n: int) -> List[Dict[str, Any]]:
+    scored: List[Dict[str, Any]] = []
+    for idx, item in enumerate(candidates):
+        raw = dict(item.get("score_raw") or {})
+        raw["keyword"] = _safe_float(raw.get("keyword"), 0.0)
+        raw["vector"] = _safe_float(raw.get("vector"), 0.0)
+        raw["recency"] = _recency_score(int(item.get("ts") or 0))
+        raw["type_boost"] = _type_boost(str(item.get("source_type") or ""))
+
+        score_final = (
+            (W_KEYWORD * raw["keyword"])
+            + (W_VECTOR * raw["vector"])
+            + (W_RECENCY * raw["recency"])
+            + (W_TYPE * raw["type_boost"])
+        )
+
+        out = {
+            "id": item.get("id") or f"ev_{idx}",
+            "source_type": item.get("source_type") or "unknown",
+            "source_id": item.get("source_id") or "",
+            "text": item.get("text") or "",
+            "score_raw": raw,
+            "score_final": round(score_final, 6),
+            "reason": item.get("reason") or "",
+            "ts": int(item.get("ts") or 0),
+            "meta": {
+                "source_name": "anchor_rag",
+                "chunk_id": item.get("chunk_id") or "",
+                **(item.get("metadata") or {}),
+            },
+        }
+        scored.append(out)
+
+    scored.sort(key=lambda x: x.get("score_final", 0.0), reverse=True)
+    n = max(1, int(top_n or RETRIEVAL_TOP_N))
+    return scored[:n]
+
+
+def _extract_vector_candidates_safe(outs: Dict[str, Any]) -> List[Dict[str, Any]]:
+    try:
+        vc = outs.get("vector_candidates") if isinstance(outs, dict) else []
+        if isinstance(vc, list):
+            return vc
+        return []
+    except Exception as e:
+        print(f"[gateway_ctx] vector_retrieval_degrade err={e}")
+        return []
+
+
 def _is_emo_chitchat(text: str) -> bool:
     t = (text or "").strip()
     if not t:
@@ -234,7 +370,7 @@ async def _call_dify_anchor(keyword: str, user: str = "mcp") -> Dict[str, Any]:
         return r.json()
 
 
-def _extract_outputs(dify_resp: Dict[str, Any]) -> Dict[str, str]:
+def _extract_outputs(dify_resp: Dict[str, Any]) -> Dict[str, Any]:
     outputs: Dict[str, Any] = {}
     if isinstance(dify_resp, dict):
         if isinstance(dify_resp.get("data"), dict) and isinstance(dify_resp["data"].get("outputs"), dict):
@@ -244,10 +380,13 @@ def _extract_outputs(dify_resp: Dict[str, Any]) -> Dict[str, str]:
 
     result = ""
     chat_text = ""
+    vector_candidates: List[Dict[str, Any]] = []
     if isinstance(outputs, dict):
         result = str(outputs.get("result") or "")
         chat_text = str(outputs.get("chat_text") or "")
-    return {"result": result, "chat_text": chat_text}
+        if isinstance(outputs.get("vector_candidates"), list):
+            vector_candidates = outputs.get("vector_candidates") or []
+    return {"result": result, "chat_text": chat_text, "vector_candidates": vector_candidates}
 
 
 async def _handle_jsonrpc(request: Request, msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -375,15 +514,24 @@ async def _handle_jsonrpc(request: Request, msg: Dict[str, Any]) -> Optional[Dic
                     outs = outs2
                     ms_dify_used = ms_dify2
 
-        evidence = _build_gateway_evidence(
+        keyword_candidates = _build_gateway_evidence(
             primary_keyword=primary_keyword,
             primary_text=primary_hit_text,
             fallback_keyword=fallback_keyword,
             fallback_text=fallback_hit_text,
         )
+        keyword_unified = _adapt_keyword_candidates(keyword_candidates)
+        try:
+            vector_candidates_raw = _extract_vector_candidates_safe(outs)
+            vector_unified = _adapt_vector_candidates(vector_candidates_raw)
+        except Exception as e:
+            print(f"[gateway_ctx] vector_retrieval_degrade err={e}")
+            vector_unified = []
+        evidence = _score_and_rank_candidates(keyword_unified + vector_unified, top_n=RETRIEVAL_TOP_N)
+
         used_evidence_ids = [ev["id"] for ev in evidence if ev.get("text") == ctx]
         if not used_evidence_ids and evidence:
-            used_evidence_ids = [evidence[-1]["id"]]
+            used_evidence_ids = [evidence[0]["id"]]
 
         res_obj = {
             "keyword": used_keyword,
@@ -392,6 +540,7 @@ async def _handle_jsonrpc(request: Request, msg: Dict[str, Any]) -> Optional[Dic
             "raw": outs,
             "evidence": evidence,
             "used_evidence_ids": used_evidence_ids,
+            "retrieval_profile_version": RETRIEVAL_PROFILE_VERSION,
             "ms_dify_primary": round(ms_dify_primary, 1),
             "ms_dify_used": round(ms_dify_used, 1),
         }
