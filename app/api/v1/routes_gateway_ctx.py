@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import time
 import re
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from fastapi import APIRouter, Request, Response
@@ -122,6 +122,61 @@ def _negotiate_protocol_version(request: Request, params: Dict[str, Any]) -> str
 
 def _mcp_wrap_text(res_obj: Dict[str, Any], text_out: str, is_error: bool) -> Dict[str, Any]:
     return {"content": [{"type": "text", "text": text_out or ""}], "isError": bool(is_error), "data": res_obj}
+
+
+def _build_evidence_item(
+    index: int,
+    source_type: str,
+    source_id: str,
+    text: str,
+    keyword_used: str,
+    ts: int,
+    chunk_id: str = "",
+    source_name: str = "anchor_rag",
+) -> Dict[str, Any]:
+    return {
+        "id": f"ev_{index}",
+        "source_type": source_type,
+        "source_id": source_id,
+        "text": text or "",
+        "score_raw": 1.0,
+        "score_final": 1.0,
+        "reason": "keyword_hit" if source_type == "keyword" else "fallback_hit",
+        "ts": ts,
+        "meta": {
+            "source_name": source_name,
+            "keyword_used": keyword_used or "",
+            "chunk_id": chunk_id or "",
+        },
+    }
+
+
+def _build_gateway_evidence(primary_keyword: str, primary_text: str, fallback_keyword: str, fallback_text: str) -> List[Dict[str, Any]]:
+    now_ts = int(time.time())
+    evidence: List[Dict[str, Any]] = []
+    if primary_text:
+        evidence.append(
+            _build_evidence_item(
+                index=len(evidence),
+                source_type="keyword",
+                source_id=primary_keyword or "",
+                text=primary_text,
+                keyword_used=primary_keyword,
+                ts=now_ts,
+            )
+        )
+    if fallback_text:
+        evidence.append(
+            _build_evidence_item(
+                index=len(evidence),
+                source_type="fallback",
+                source_id=fallback_keyword or "",
+                text=fallback_text,
+                keyword_used=fallback_keyword,
+                ts=now_ts,
+            )
+        )
+    return evidence
 
 
 def _is_emo_chitchat(text: str) -> bool:
@@ -296,6 +351,9 @@ async def _handle_jsonrpc(request: Request, msg: Dict[str, Any]) -> Optional[Dic
         used_keyword = primary_keyword
         ms_dify_primary = ms_dify
         ms_dify_used = ms_dify
+        primary_hit_text = ctx
+        fallback_keyword = ""
+        fallback_hit_text = ""
 
         # 3.1 如果 primary keyword 没命中（ctx 为空），再按“撒娇程度”路由到亲密兜底 keyword，并重试一次
         if not ctx:
@@ -311,16 +369,29 @@ async def _handle_jsonrpc(request: Request, msg: Dict[str, Any]) -> Optional[Dic
                 picked2 = (outs2.get("result") or "").strip() or (outs2.get("chat_text") or "").strip()
                 ctx2 = _truncate_ctx(picked2)
                 if ctx2:
+                    fallback_hit_text = ctx2
                     used_keyword = fallback_keyword
                     ctx = ctx2
                     outs = outs2
                     ms_dify_used = ms_dify2
+
+        evidence = _build_gateway_evidence(
+            primary_keyword=primary_keyword,
+            primary_text=primary_hit_text,
+            fallback_keyword=fallback_keyword,
+            fallback_text=fallback_hit_text,
+        )
+        used_evidence_ids = [ev["id"] for ev in evidence if ev.get("text") == ctx]
+        if not used_evidence_ids and evidence:
+            used_evidence_ids = [evidence[-1]["id"]]
 
         res_obj = {
             "keyword": used_keyword,
             "keyword_primary": primary_keyword,
             "ctx": ctx,
             "raw": outs,
+            "evidence": evidence,
+            "used_evidence_ids": used_evidence_ids,
             "ms_dify_primary": round(ms_dify_primary, 1),
             "ms_dify_used": round(ms_dify_used, 1),
         }
