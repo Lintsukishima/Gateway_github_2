@@ -34,7 +34,7 @@ GATEWAY_CTX_DEBUG = os.getenv("GATEWAY_CTX_DEBUG", "0").strip().lower() in ("1",
 DIFY_TIMEOUT_SECS = float(os.getenv("DIFY_TIMEOUT_SECS", "30"))
 RETRIEVAL_TOP_N = int(os.getenv("RETRIEVAL_TOP_N", "3"))
 
-RETRIEVAL_PROFILE_VERSION = "v1.0.0"
+RETRIEVAL_PROFILE_VERSION = os.getenv("RETRIEVAL_PROFILE_VERSION", "v1.0.0").strip() or "v1.0.0"
 W_KEYWORD = 0.40
 W_VECTOR = 0.40
 W_RECENCY = 0.10
@@ -478,6 +478,19 @@ def _normalize_kw(keyword: str) -> str:
     return ",".join(uniq)
 
 
+def _has_cache_for_other_profile(user: str, keyword: str, profile_version: str) -> bool:
+    prefix = f"{user}||{keyword}||"
+    legacy_key = f"{user}||{keyword}"
+    for key in _cache.keys():
+        if key == legacy_key:
+            return True
+        if key.startswith(prefix):
+            other_profile = key[len(prefix):]
+            if other_profile and other_profile != profile_version:
+                return True
+    return False
+
+
 
 async def _call_dify_anchor(keyword: str, user: str = "mcp") -> Dict[str, Any]:
     if not DIFY_API_KEY:
@@ -592,7 +605,7 @@ async def _handle_jsonrpc(request: Request, msg: Dict[str, Any]) -> Optional[Dic
     # 2) 再生成 cache_key（必须在 keyword 最终确定之后）
     keyword = _normalize_kw(keyword)
     primary_keyword = keyword
-    cache_key = f"{user}||{primary_keyword}"
+    cache_key = f"{user}||{primary_keyword}||{RETRIEVAL_PROFILE_VERSION}"
     t0 = time.perf_counter()
     if GATEWAY_CTX_DEBUG:
         print(f"[gateway_ctx] pid={os.getpid()} cache_size={len(_cache)} kw={keyword!r}")
@@ -601,7 +614,7 @@ async def _handle_jsonrpc(request: Request, msg: Dict[str, Any]) -> Optional[Dic
     # cache hit?
     now = time.time()
     hit = _cache.get(cache_key)
-    cache_miss_reason = "not_found"
+    cache_miss_reason = "profile_changed" if _has_cache_for_other_profile(user, primary_keyword, RETRIEVAL_PROFILE_VERSION) else "not_found"
     if hit:
         cache_miss_reason = "expired" if (now - hit[0] > CACHE_TTL_SECS) else "bypassed"
 
@@ -615,6 +628,7 @@ async def _handle_jsonrpc(request: Request, msg: Dict[str, Any]) -> Optional[Dic
             keyword_used=str((res_obj or {}).get("keyword") or primary_keyword),
             evidence=evidence_cached,
         )
+        res_obj["retrieval_profile_version"] = RETRIEVAL_PROFILE_VERSION
         res_obj.update(debug)
         dt = (time.perf_counter() - t0) * 1000
         print(f"[gateway_ctx] cache_hit kw={keyword!r} ms={dt:.1f} len={len(ctx)}")
@@ -714,6 +728,7 @@ async def _handle_jsonrpc(request: Request, msg: Dict[str, Any]) -> Optional[Dic
             "keyword": keyword,
             "keyword_primary": primary_keyword,
             "keyword_used": primary_keyword,
+            "retrieval_profile_version": RETRIEVAL_PROFILE_VERSION,
             "error": str(e),
         }
         res_obj.update(
