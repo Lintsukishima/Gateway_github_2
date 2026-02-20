@@ -432,6 +432,34 @@ def _truncate_ctx(text: str) -> str:
         return t
     return t[:CTX_MAX].rstrip() + "…"
 
+
+def _compute_grounding_mode(evidence: List[Dict[str, Any]]) -> str:
+    if not evidence:
+        return "none"
+    top1 = _safe_float(evidence[0].get("score_final"), 0.0)
+    valid_evidence_count = sum(1 for ev in evidence if str(ev.get("text") or "").strip())
+    if top1 < 0.45 and valid_evidence_count < 2:
+        return "weak"
+    return "strong"
+
+
+def _debug_fields(
+    *,
+    cache_hit: bool,
+    cache_miss_reason: str,
+    keyword_primary: str,
+    keyword_used: str,
+    evidence: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    ev = evidence if isinstance(evidence, list) else []
+    return {
+        "cache_hit": bool(cache_hit),
+        "cache_miss_reason": cache_miss_reason,
+        "keyword_primary": keyword_primary or "",
+        "keyword_used": keyword_used or "",
+        "grounding_mode": _compute_grounding_mode(ev),
+    }
+
 def _normalize_kw(keyword: str) -> str:
     """Normalize keyword string to stabilize caching."""
     kw = (keyword or "").strip()
@@ -573,8 +601,21 @@ async def _handle_jsonrpc(request: Request, msg: Dict[str, Any]) -> Optional[Dic
     # cache hit?
     now = time.time()
     hit = _cache.get(cache_key)
+    cache_miss_reason = "not_found"
+    if hit:
+        cache_miss_reason = "expired" if (now - hit[0] > CACHE_TTL_SECS) else "bypassed"
+
     if hit and (now - hit[0] <= CACHE_TTL_SECS):
         ctx, res_obj = hit[1], hit[2]
+        evidence_cached = res_obj.get("evidence") if isinstance(res_obj, dict) else []
+        debug = _debug_fields(
+            cache_hit=True,
+            cache_miss_reason=cache_miss_reason,
+            keyword_primary=primary_keyword,
+            keyword_used=str((res_obj or {}).get("keyword") or primary_keyword),
+            evidence=evidence_cached,
+        )
+        res_obj.update(debug)
         dt = (time.perf_counter() - t0) * 1000
         print(f"[gateway_ctx] cache_hit kw={keyword!r} ms={dt:.1f} len={len(ctx)}")
         return None if is_notification else _jsonrpc_result(_id, _mcp_wrap_text(res_obj, ctx, is_error=False))
@@ -636,6 +677,7 @@ async def _handle_jsonrpc(request: Request, msg: Dict[str, Any]) -> Optional[Dic
         res_obj = {
             "keyword": used_keyword,
             "keyword_primary": primary_keyword,
+            "keyword_used": used_keyword,
             "ctx": ctx,
             "raw": outs,
             "evidence": evidence,
@@ -644,6 +686,15 @@ async def _handle_jsonrpc(request: Request, msg: Dict[str, Any]) -> Optional[Dic
             "ms_dify_primary": round(ms_dify_primary, 1),
             "ms_dify_used": round(ms_dify_used, 1),
         }
+        res_obj.update(
+            _debug_fields(
+                cache_hit=False,
+                cache_miss_reason=cache_miss_reason,
+                keyword_primary=primary_keyword,
+                keyword_used=used_keyword,
+                evidence=evidence,
+            )
+        )
 
         # ✅ 写入缓存时用最新 now（更符合 TTL 语义）
         _cache[cache_key] = (time.time(), ctx, res_obj)
@@ -659,7 +710,21 @@ async def _handle_jsonrpc(request: Request, msg: Dict[str, Any]) -> Optional[Dic
     except Exception as e:
         ms_all = (time.perf_counter() - t0) * 1000
         print(f"[gateway_ctx] ERROR kw={keyword!r} ms_all={ms_all:.1f} err={e}")
-        res_obj = {"keyword": keyword, "error": str(e)}
+        res_obj = {
+            "keyword": keyword,
+            "keyword_primary": primary_keyword,
+            "keyword_used": primary_keyword,
+            "error": str(e),
+        }
+        res_obj.update(
+            _debug_fields(
+                cache_hit=False,
+                cache_miss_reason=cache_miss_reason,
+                keyword_primary=primary_keyword,
+                keyword_used=primary_keyword,
+                evidence=[],
+            )
+        )
         return None if is_notification else _jsonrpc_result(_id, _mcp_wrap_text(res_obj, str(e), is_error=True))
 
 
