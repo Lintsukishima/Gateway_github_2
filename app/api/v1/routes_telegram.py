@@ -181,6 +181,7 @@ async def telegram_webhook(req: Request):
 
     # 2.5) Anchor RAG（语气锚点）
     anchor_block = ""
+    snips: list[str] = []
     try:
         snips = query_anchor_snippets(
             user_text=text,
@@ -218,8 +219,8 @@ async def telegram_webhook(req: Request):
             session_id=session_id,
             user_text=text,
             assistant_text=reply,
-            s4_every_user_turn=int(os.getenv("S4_EVERY", "4")),
-            s60_every_user_turn=int(os.getenv("S60_EVERY", "30")),
+            s4_every_user_turns=int(os.getenv("S4_EVERY", "4")),
+            s60_every_user_turns=int(os.getenv("S60_EVERY", "30")),
             model_name=os.getenv("SUMMARIZER_MODEL_NAME", "summarizer_mvp"),
         )
     finally:

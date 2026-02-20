@@ -6,7 +6,7 @@ from fastapi import APIRouter, Request
 from zoneinfo import ZoneInfo
 
 from app.db.session import SessionLocal
-from app.services.chat_service import chat_once
+from app.services.chat_service import append_user_and_assistant
 from pathlib import Path
 
 
@@ -140,18 +140,11 @@ async def telegram_webhook(req: Request):
     # 把这一轮写入 DB（含 user_turn），并触发 S4(每4句)/S60(每30句) 自动摘要
     db = SessionLocal()
     try:
-        chat_once(
+        append_user_and_assistant(
             db,
             session_id=f"tg:{chat_id}",
-            user_id=f"tg_user:{chat_id}",
             user_text=text,
-            meta={
-                "channel": "telegram",
-                "telegram_message_id": msg.get("message_id"),
-                "telegram_date": msg.get("date"),
-            },
-            reply_text=reply,
-            assistant_meta={"channel": "telegram"},
+            assistant_text=reply,
         )
     finally:
         db.close()
