@@ -82,7 +82,7 @@ def _compact_summary_block(s4: Optional[Dict[str, Any]], s60: Optional[Dict[str,
     if not parts:
         return ""
     return (
-        "【Internal Memory摘要（仅用于你在心里对齐语气与上下文，不要在回复中提到“摘要/记忆/系统”）】\n"
+        "【Internal Memory事实约束（仅用于事实一致性，不可作为语气模板；不要在回复中提到“摘要/记忆/系统”）】\n"
         + "\n".join(parts)
         + "\n【End】"
     )
@@ -298,7 +298,12 @@ def _extract_keywords(text: str, k: int = 2) -> str:
 # -----------------------------
 # NEW: call local MCP gateway_ctx
 # -----------------------------
-async def _call_local_gateway_ctx(keyword: str, text: str, user: str) -> str:
+async def _call_local_gateway_ctx(
+    keyword: str,
+    text: str,
+    user: str,
+    summaries: Optional[Dict[str, Any]] = None,
+) -> str:
     req_id = uuid.uuid4().hex[:8]
     payload = {
         "jsonrpc": "2.0",
@@ -310,6 +315,7 @@ async def _call_local_gateway_ctx(keyword: str, text: str, user: str) -> str:
                 "keyword": keyword,
                 "text": text,
                 "user": user,
+                "summaries": summaries or {},
             }
         }
     }
@@ -361,7 +367,8 @@ def _resolve_writer_mode(payload: Dict[str, Any]) -> str:
 def _build_writer_constraint_block(writer_mode: str) -> str:
     base = (
         "【Writer Constraint】\n"
-        "你可以自然发挥、保持表达灵活与有温度。"
+        "你可以自然发挥、保持表达灵活与有温度。\n"
+        "禁止语气迁移：S4/S60 仅可作为事实约束，严禁把其中原话或语气当作措辞模板。"
     )
     if writer_mode == "weak":
         return (
@@ -480,7 +487,12 @@ async def chat_completions(request: Request):
         # 使用稳定的会话标识，避免每次请求的 user 变化
         metadata = payload.get("metadata", {})
         stable_user = (metadata.get("gateway_user") or payload.get("user") or GATEWAY_CTX_USER)
-        ctx = await _call_local_gateway_ctx(keyword=kw, text=user_text, user=stable_user)
+        ctx = await _call_local_gateway_ctx(
+            keyword=kw,
+            text=user_text,
+            user=stable_user,
+            summaries={"s4": sums.get("s4"), "s60": sums.get("s60")},
+        )
         anchor_block = _build_anchor_system_block(ctx)
 
     system_blocks = []

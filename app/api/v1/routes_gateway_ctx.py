@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 import re
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -194,9 +195,77 @@ def _safe_float(v: Any, default: float = 0.0) -> float:
 
 
 def _type_boost(source_type: str) -> float:
+    if source_type == "current_input":
+        return 1.3
+    if source_type == "s4":
+        return 1.2
+    if source_type == "s60":
+        return 1.1
     if source_type in ("keyword", "vector"):
         return 1.0
     return 0.6
+
+
+def _source_priority(source_type: str) -> int:
+    if source_type == "current_input":
+        return 4
+    if source_type == "s4":
+        return 3
+    if source_type == "s60":
+        return 2
+    return 1
+
+
+def _parse_iso_ts(created_at: str) -> int:
+    try:
+        if not created_at:
+            return int(time.time())
+        return int(datetime.fromisoformat(created_at.replace("Z", "+00:00")).timestamp())
+    except Exception:
+        return int(time.time())
+
+
+def _build_summary_candidates(summaries: Dict[str, Any], text: str) -> List[Dict[str, Any]]:
+    now_ts = int(time.time())
+    out: List[Dict[str, Any]] = []
+    if text:
+        out.append(
+            {
+                "id": "input_0",
+                "source_type": "current_input",
+                "source_id": "current_input",
+                "text": text,
+                "chunk_id": "",
+                "metadata": {"source_name": "gateway_input"},
+                "reason": "当前输入事实优先",
+                "ts": now_ts,
+                "score_raw": {"keyword": 0.0, "vector": 0.0},
+            }
+        )
+
+    for source_type in ("s4", "s60"):
+        item = (summaries or {}).get(source_type) or {}
+        summary = item.get("summary")
+        if not summary:
+            continue
+        out.append(
+            {
+                "id": f"{source_type}_0",
+                "source_type": source_type,
+                "source_id": source_type,
+                "text": summary if isinstance(summary, str) else str(summary),
+                "chunk_id": "",
+                "metadata": {
+                    "source_name": "memory_summary",
+                    "range": item.get("range") or [],
+                    "model": item.get("model") or "",
+                },
+                "reason": f"来自{source_type.upper()}的事实约束",
+                "ts": _parse_iso_ts(str(item.get("created_at") or "")),
+                "score_raw": {"keyword": 0.0, "vector": 0.0},
+            }
+        )
+    return out
 
 
 def _recency_score(ts: int) -> float:
@@ -294,12 +363,20 @@ def _score_and_rank_candidates(candidates: List[Dict[str, Any]], top_n: int) -> 
             "meta": {
                 "source_name": "anchor_rag",
                 "chunk_id": item.get("chunk_id") or "",
+                "source_priority": _source_priority(str(item.get("source_type") or "")),
                 **(item.get("metadata") or {}),
             },
         }
         scored.append(out)
 
-    scored.sort(key=lambda x: x.get("score_final", 0.0), reverse=True)
+    scored.sort(
+        key=lambda x: (
+            x.get("score_final", 0.0),
+            _source_priority(str(x.get("source_type") or "")),
+            _safe_float((x.get("score_raw") or {}).get("recency"), 0.0),
+        ),
+        reverse=True,
+    )
     n = max(1, int(top_n or RETRIEVAL_TOP_N))
     return _postprocess_candidates(scored, top_n=n)
 
@@ -559,6 +636,10 @@ async def _handle_jsonrpc(request: Request, msg: Dict[str, Any]) -> Optional[Dic
                     "keyword": {"type": "string", "description": "search keywords"},
                     "text": {"type": "string", "description": "optional raw user message"},
                     "user": {"type": "string", "description": "optional user/session id"},
+                    "summaries": {
+                        "type": "object",
+                        "description": "optional session summaries, support s4/s60 as fact constraints",
+                    },
                 },
                 "required": ["keyword"],
             },
@@ -576,6 +657,7 @@ async def _handle_jsonrpc(request: Request, msg: Dict[str, Any]) -> Optional[Dic
     keyword = str(arguments.get("keyword") or "").strip()
     text = str(arguments.get("text") or "").strip()
     user = str(arguments.get("user") or "mcp").strip()
+    summaries = arguments.get("summaries") if isinstance(arguments.get("summaries"), dict) else {}
 
         # 1) 先确定 primary keyword（优先使用上游抽取结果；仅在缺失/乱码时，才用 text 推导中文关键词）
     primary_keyword_raw = keyword
@@ -684,7 +766,8 @@ async def _handle_jsonrpc(request: Request, msg: Dict[str, Any]) -> Optional[Dic
         except Exception as e:
             print(f"[gateway_ctx] vector_retrieval_degrade err={e}")
             vector_unified = []
-        evidence = _score_and_rank_candidates(keyword_unified + vector_unified, top_n=RETRIEVAL_TOP_N)
+        summary_unified = _build_summary_candidates(summaries=summaries, text=text)
+        evidence = _score_and_rank_candidates(keyword_unified + vector_unified + summary_unified, top_n=RETRIEVAL_TOP_N)
 
         used_evidence_ids = [ev.get("id") for ev in evidence if ev.get("id")]
 
