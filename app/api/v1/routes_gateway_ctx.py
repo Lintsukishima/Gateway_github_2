@@ -301,7 +301,109 @@ def _score_and_rank_candidates(candidates: List[Dict[str, Any]], top_n: int) -> 
 
     scored.sort(key=lambda x: x.get("score_final", 0.0), reverse=True)
     n = max(1, int(top_n or RETRIEVAL_TOP_N))
-    return scored[:n]
+    return _postprocess_candidates(scored, top_n=n)
+
+
+def _normalize_text_for_dedupe(text: str) -> str:
+    t = (text or "").strip().lower()
+    if not t:
+        return ""
+    t = re.sub(r"[\W_]+", " ", t, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _tokenize_for_jaccard(text: str) -> set[str]:
+    nt = _normalize_text_for_dedupe(text)
+    if not nt:
+        return set()
+    tokens = re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]", nt)
+    if not tokens:
+        return set(nt.split())
+    return set(tokens)
+
+
+def _jaccard_similarity(a: set[str], b: set[str]) -> float:
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    union = len(a | b)
+    if union <= 0:
+        return 0.0
+    return inter / union
+
+
+def _dup_payload(ev: Dict[str, Any]) -> Dict[str, Any]:
+    meta = ev.get("meta") or {}
+    return {
+        "id": ev.get("id") or "",
+        "source_type": ev.get("source_type") or "",
+        "source_id": ev.get("source_id") or "",
+        "chunk_id": meta.get("chunk_id") or "",
+        "score_final": ev.get("score_final") or 0.0,
+        "reason": ev.get("reason") or "",
+    }
+
+
+def _merge_duplicate(kept: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, Any]:
+    k_score = _safe_float(kept.get("score_final"), 0.0)
+    i_score = _safe_float(incoming.get("score_final"), 0.0)
+
+    keeper = kept
+    dup = incoming
+    if i_score > k_score:
+        keeper, dup = incoming, kept
+
+    keeper_meta = dict(keeper.get("meta") or {})
+    keeper_dups = list(keeper_meta.get("duplicates") or [])
+    keeper_dups.append(_dup_payload(dup))
+    keeper_meta["duplicates"] = keeper_dups
+    keeper["meta"] = keeper_meta
+    return keeper
+
+
+def _postprocess_candidates(scored: List[Dict[str, Any]], top_n: int) -> List[Dict[str, Any]]:
+    # Step-1: 按 source_id + chunk_id 去重，保留 score_final 更高者
+    by_source_chunk: List[Dict[str, Any]] = []
+    key_index: Dict[Tuple[str, str], int] = {}
+    for ev in scored:
+        ev2 = dict(ev)
+        ev2["meta"] = dict(ev2.get("meta") or {})
+        ev2["meta"].setdefault("duplicates", [])
+
+        key = (str(ev2.get("source_id") or ""), str(ev2["meta"].get("chunk_id") or ""))
+        if key not in key_index:
+            key_index[key] = len(by_source_chunk)
+            by_source_chunk.append(ev2)
+            continue
+
+        idx = key_index[key]
+        merged = _merge_duplicate(by_source_chunk[idx], ev2)
+        by_source_chunk[idx] = merged
+
+    # Step-2: 文本归一化 + token Jaccard 近似去重
+    deduped: List[Dict[str, Any]] = []
+    token_sets: List[set[str]] = []
+    for ev in by_source_chunk:
+        cur_tokens = _tokenize_for_jaccard(str(ev.get("text") or ""))
+        duplicate_idx = None
+        for i, seen_tokens in enumerate(token_sets):
+            if _jaccard_similarity(cur_tokens, seen_tokens) > 0.9:
+                duplicate_idx = i
+                break
+
+        if duplicate_idx is None:
+            deduped.append(ev)
+            token_sets.append(cur_tokens)
+            continue
+
+        merged = _merge_duplicate(deduped[duplicate_idx], ev)
+        deduped[duplicate_idx] = merged
+        token_sets[duplicate_idx] = _tokenize_for_jaccard(str(merged.get("text") or ""))
+
+    deduped.sort(key=lambda x: x.get("score_final", 0.0), reverse=True)
+    return deduped[:top_n]
 
 
 def _extract_vector_candidates_safe(outs: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -529,9 +631,7 @@ async def _handle_jsonrpc(request: Request, msg: Dict[str, Any]) -> Optional[Dic
             vector_unified = []
         evidence = _score_and_rank_candidates(keyword_unified + vector_unified, top_n=RETRIEVAL_TOP_N)
 
-        used_evidence_ids = [ev["id"] for ev in evidence if ev.get("text") == ctx]
-        if not used_evidence_ids and evidence:
-            used_evidence_ids = [evidence[0]["id"]]
+        used_evidence_ids = [ev.get("id") for ev in evidence if ev.get("id")]
 
         res_obj = {
             "keyword": used_keyword,

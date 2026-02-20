@@ -21,6 +21,7 @@ router = APIRouter()
 FORCE_GATEWAY_EVERY_TURN = os.getenv("FORCE_GATEWAY_EVERY_TURN", "1") == "1"
 GATEWAY_CTX_USER = os.getenv("GATEWAY_CTX_USER", "rikkahub").strip() or "rikkahub"
 ANCHOR_INJECT_ENABLED = os.getenv("ANCHOR_INJECT_ENABLED", "1") == "1"
+WRITER_MODE_DEFAULT = (os.getenv("WRITER_MODE", "normal") or "normal").strip().lower()
 
 LOCAL_MCP_BASE = os.getenv("LOCAL_MCP_BASE", "http://127.0.0.1:8000").rstrip("/")
 LOCAL_MCP_GATEWAY_URL = os.getenv(
@@ -347,6 +348,31 @@ def _build_anchor_system_block(snippet: str) -> str:
         "【End】"
     )
 
+
+def _resolve_writer_mode(payload: Dict[str, Any]) -> str:
+    metadata = payload.get("metadata") if isinstance(payload, dict) else {}
+    if isinstance(metadata, dict):
+        mode = metadata.get("writer_mode") or metadata.get("mode")
+        if isinstance(mode, str) and mode.strip():
+            return mode.strip().lower()
+    return WRITER_MODE_DEFAULT
+
+
+def _build_writer_constraint_block(writer_mode: str) -> str:
+    base = (
+        "【Writer Constraint】\n"
+        "你可以自然发挥、保持表达灵活与有温度。"
+    )
+    if writer_mode == "weak":
+        return (
+            base
+            + "\n"
+            + "当前为 weak 模式：禁止编造明确事实（如时间、地点、人物身份、事件经过、数据、引用来源）。"
+            + "若事实不确定，请明确说明不确定，或用条件句/建议式表达。\n"
+            + "【End】"
+        )
+    return base + "\n【End】"
+
 # -----------------------------
 # Streaming proxy: single stream + collect + store
 # -----------------------------
@@ -462,6 +488,8 @@ async def chat_completions(request: Request):
         system_blocks.append(s_block)
     if anchor_block:
         system_blocks.append(anchor_block)
+    writer_mode = _resolve_writer_mode(payload)
+    system_blocks.append(_build_writer_constraint_block(writer_mode))
 
     messages2 = _inject_system(messages, system_blocks)
 
