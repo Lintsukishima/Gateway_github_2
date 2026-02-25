@@ -468,7 +468,11 @@ async def chat_completions(request: Request):
     if not isinstance(messages, list):
         return JSONResponse({"error": {"message": "messages must be a list"}}, status_code=400)
 
-    messages = _sanitize_messages_for_upstream(messages)
+    # 当请求显式携带 tools/functions 时，保留完整工具轮次，
+    # 避免把客户端（如 RikkaHub）传入的 tool 历史意外清掉，导致“工具执行后空回”。
+    has_tools = bool(payload.get("tools") or payload.get("functions"))
+    if not has_tools:
+        messages = _sanitize_messages_for_upstream(messages)
     user_text = _last_user_text(messages)
 
     # summaries
