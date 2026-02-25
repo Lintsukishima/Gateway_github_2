@@ -22,6 +22,8 @@ FORCE_GATEWAY_EVERY_TURN = os.getenv("FORCE_GATEWAY_EVERY_TURN", "1") == "1"
 GATEWAY_CTX_USER = os.getenv("GATEWAY_CTX_USER", "rikkahub").strip() or "rikkahub"
 ANCHOR_INJECT_ENABLED = os.getenv("ANCHOR_INJECT_ENABLED", "1") == "1"
 WRITER_MODE_DEFAULT = (os.getenv("WRITER_MODE", "normal") or "normal").strip().lower()
+TOOL_EMPTY_CONTENT_COMPAT = os.getenv("TOOL_EMPTY_CONTENT_COMPAT", "1") == "1"
+TOOL_EMPTY_CONTENT_PLACEHOLDER = (os.getenv("TOOL_EMPTY_CONTENT_PLACEHOLDER", "（正在调用工具…）") or "（正在调用工具…）").strip()
 
 LOCAL_MCP_BASE = os.getenv("LOCAL_MCP_BASE", "http://127.0.0.1:8000").rstrip("/")
 LOCAL_MCP_GATEWAY_URL = os.getenv(
@@ -355,6 +357,37 @@ def _build_anchor_system_block(snippet: str) -> str:
     )
 
 
+
+
+def _apply_tool_empty_content_compat(data: Dict[str, Any]) -> Dict[str, Any]:
+    if not TOOL_EMPTY_CONTENT_COMPAT:
+        return data
+    if not isinstance(data, dict):
+        return data
+    choices = data.get("choices") or []
+    if not isinstance(choices, list) or not choices:
+        return data
+    c0 = choices[0] if isinstance(choices[0], dict) else {}
+    msg = c0.get("message") if isinstance(c0.get("message"), dict) else None
+    if not msg:
+        return data
+
+    finish_reason = c0.get("finish_reason")
+    has_tool_calls = bool(msg.get("tool_calls"))
+    content = msg.get("content")
+
+    if finish_reason == "tool_calls" and has_tool_calls and isinstance(content, str) and not content.strip():
+        out = dict(data)
+        out_choices = list(choices)
+        out_c0 = dict(c0)
+        out_msg = dict(msg)
+        out_msg["content"] = TOOL_EMPTY_CONTENT_PLACEHOLDER
+        out_c0["message"] = out_msg
+        out_choices[0] = out_c0
+        out["choices"] = out_choices
+        return out
+    return data
+
 def _resolve_writer_mode(payload: Dict[str, Any]) -> str:
     metadata = payload.get("metadata") if isinstance(payload, dict) else {}
     if isinstance(metadata, dict):
@@ -557,6 +590,8 @@ async def chat_completions(request: Request):
             return resp
 
         data = r.json()
+
+    data = _apply_tool_empty_content_compat(data)
 
     assistant_text = ""
     try:
