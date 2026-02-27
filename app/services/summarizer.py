@@ -222,6 +222,10 @@ def run_s4(
     to_user_turn: int,
     window_user_turn: int = 4,
     model_name: str = "summarizer_mvp",
+    thread_id: Optional[str] = None,
+    memory_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    summary_version: int = 1,
 ) -> Dict[str, Any]:
     """短期总结：按 user_turn 窗口。"""
 
@@ -256,8 +260,20 @@ def run_s4(
     transcript = _render_transcript(msgs)
     summary_obj = _summarize_with_optional_llm(transcript, level="短期")
 
+    first_msg = msgs[0]
+    trace_thread_id = thread_id or getattr(first_msg, "thread_id", None)
+    trace_memory_id = memory_id or getattr(first_msg, "memory_id", None)
+    trace_agent_id = agent_id or getattr(first_msg, "agent_id", None)
+    dedupe_key = f"s4:{session_id}:{from_turn}:{to_turn}:{summary_version}"
+
     row = SummaryS4(
         session_id=session_id,
+        scope_type="session",
+        thread_id=trace_thread_id,
+        memory_id=trace_memory_id,
+        agent_id=trace_agent_id,
+        summary_version=summary_version,
+        dedupe_key=dedupe_key,
         from_turn=from_turn,
         to_turn=to_turn,
         summary_json=_safe_json_dumps(summary_obj),
@@ -288,6 +304,10 @@ def run_s60(
     to_user_turn: int,
     window_user_turn: int = 30,
     model_name: str = "summarizer_mvp",
+    thread_id: Optional[str] = None,
+    memory_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    summary_version: int = 1,
 ) -> Dict[str, Any]:
     """长期总结：你现在要的是 30 轮 user 消息。"""
 
@@ -320,8 +340,20 @@ def run_s60(
     transcript = _render_transcript(msgs)
     summary_obj = _summarize_with_optional_llm(transcript, level="长期")
 
+    first_msg = msgs[0]
+    trace_thread_id = thread_id or getattr(first_msg, "thread_id", None)
+    trace_memory_id = memory_id or getattr(first_msg, "memory_id", None)
+    trace_agent_id = agent_id or getattr(first_msg, "agent_id", None)
+    dedupe_key = f"s60:{session_id}:{from_turn}:{to_turn}:{summary_version}"
+
     row = SummaryS60(
         session_id=session_id,
+        scope_type="session",
+        thread_id=trace_thread_id,
+        memory_id=trace_memory_id,
+        agent_id=trace_agent_id,
+        summary_version=summary_version,
+        dedupe_key=dedupe_key,
         from_turn=from_turn,
         to_turn=to_turn,
         summary_json=_safe_json_dumps(summary_obj),
