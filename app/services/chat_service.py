@@ -49,6 +49,29 @@ def _next_user_turn(db: OrmSession, session_id: str) -> int:
     return last_ut + 1
 
 
+def _count_scoped_user_turns(
+    db: OrmSession,
+    *,
+    session_id: str,
+    scope_type: str,
+    thread_id: Optional[str],
+    memory_id: Optional[str],
+    agent_id: Optional[str],
+) -> int:
+    q = db.query(Message).filter(Message.session_id == session_id).filter(Message.role == "user")
+
+    if scope_type == "thread":
+        if thread_id is not None:
+            q = q.filter(Message.thread_id == thread_id)
+    elif scope_type == "memory":
+        if memory_id is not None:
+            q = q.filter(Message.memory_id == memory_id)
+        if agent_id is not None:
+            q = q.filter(Message.agent_id == agent_id)
+
+    return q.count()
+
+
 @dataclass
 class ChatOnceResult:
     session_id: str
@@ -73,6 +96,7 @@ def chat_once(
     thread_id: Optional[str] = None,
     memory_id: Optional[str] = None,
     agent_id: Optional[str] = None,
+    s4_scope: str = "thread",
 ) -> ChatOnceResult:
     """
     写入一轮 user + assistant 消息，并按 user_turn 触发滚动总结：
@@ -127,32 +151,58 @@ def chat_once(
 
     db.commit()
 
-    # 触发 summarizer（注意：这里传的是 to_user_turn 语义）
-    triggered_s4 = (user_turn % s4_every_user_turns == 0)
-    triggered_s60 = (user_turn % s60_every_user_turns == 0)
+    effective_s4_scope = (s4_scope or "thread").lower()
+    if effective_s4_scope == "auto":
+        effective_s4_scope = "thread"
+    if effective_s4_scope not in {"thread", "memory"}:
+        effective_s4_scope = "thread"
+
+    s4_scope_user_turn = _count_scoped_user_turns(
+        db,
+        session_id=session_id,
+        scope_type=effective_s4_scope,
+        thread_id=thread_id,
+        memory_id=memory_id,
+        agent_id=agent_id,
+    )
+    s60_scope_user_turn = _count_scoped_user_turns(
+        db,
+        session_id=session_id,
+        scope_type="memory",
+        thread_id=thread_id,
+        memory_id=memory_id,
+        agent_id=agent_id,
+    )
+
+    # 触发 summarizer（to_user_turn 是 scope 内的 user_turn）
+    triggered_s4 = (s4_scope_user_turn % s4_every_user_turns == 0)
+    triggered_s60 = (s60_scope_user_turn % s60_every_user_turns == 0)
 
     if triggered_s4:
         run_s4(
             db,
             session_id=session_id,
-            to_user_turn=user_turn,
+            to_user_turn=s4_scope_user_turn,
             window_user_turn=s4_window_user_turns,
             model_name=model_name,
             thread_id=thread_id,
             memory_id=memory_id,
             agent_id=agent_id,
+            s4_scope=effective_s4_scope,
+            summary_version=1,
         )
 
     if triggered_s60:
         run_s60(
             db,
             session_id=session_id,
-            to_user_turn=user_turn,
+            to_user_turn=s60_scope_user_turn,
             window_user_turn=s60_window_user_turns,
             model_name=model_name,
             thread_id=thread_id,
             memory_id=memory_id,
             agent_id=agent_id,
+            summary_version=1,
         )
 
     return ChatOnceResult(
