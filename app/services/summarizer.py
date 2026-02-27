@@ -212,6 +212,70 @@ def _summarize_with_optional_llm(transcript: str, *, level: str) -> Dict[str, An
     return _sanitize_summary(transcript, obj)
 
 
+def _build_scope_query(
+    db: Session,
+    *,
+    session_id: str,
+    scope_type: str,
+    thread_id: Optional[str],
+    memory_id: Optional[str],
+    agent_id: Optional[str],
+):
+    q = db.query(Message).filter(Message.session_id == session_id)
+
+    if scope_type == "thread":
+        if thread_id is not None:
+            q = q.filter(Message.thread_id == thread_id)
+    elif scope_type == "memory":
+        if memory_id is not None:
+            q = q.filter(Message.memory_id == memory_id)
+        if agent_id is not None:
+            q = q.filter(Message.agent_id == agent_id)
+
+    return q
+
+
+def _resolve_scope_user_turns(
+    db: Session,
+    *,
+    session_id: str,
+    to_user_turn: int,
+    window_user_turn: int,
+    scope_type: str,
+    thread_id: Optional[str],
+    memory_id: Optional[str],
+    agent_id: Optional[str],
+) -> List[int]:
+    user_turn_rows = (
+        _build_scope_query(
+            db,
+            session_id=session_id,
+            scope_type=scope_type,
+            thread_id=thread_id,
+            memory_id=memory_id,
+            agent_id=agent_id,
+        )
+        .filter(Message.role == "user")
+        .order_by(Message.turn_id.desc())
+        .limit(to_user_turn)
+        .all()
+    )
+
+    ordered_user_turns: List[int] = []
+    seen = set()
+    for row in reversed(user_turn_rows):
+        ut = row.user_turn
+        if ut is None or ut in seen:
+            continue
+        seen.add(ut)
+        ordered_user_turns.append(ut)
+
+    if not ordered_user_turns:
+        return []
+
+    return ordered_user_turns[-window_user_turn:]
+
+
 # ========= 对外：S4 / S60 =========
 
 
@@ -225,20 +289,42 @@ def run_s4(
     thread_id: Optional[str] = None,
     memory_id: Optional[str] = None,
     agent_id: Optional[str] = None,
+    s4_scope: str = "thread",
     summary_version: int = 1,
 ) -> Dict[str, Any]:
     """短期总结：按 user_turn 窗口。"""
 
-    start_ut = max(1, to_user_turn - window_user_turn + 1)
+    effective_scope = (s4_scope or "thread").lower()
+    if effective_scope == "auto":
+        effective_scope = "thread"
+    if effective_scope not in {"thread", "memory"}:
+        effective_scope = "thread"
 
-    # 取窗口内所有消息（user + assistant），按 turn_id 还原
+    scoped_user_turns = _resolve_scope_user_turns(
+        db,
+        session_id=session_id,
+        to_user_turn=to_user_turn,
+        window_user_turn=window_user_turn,
+        scope_type=effective_scope,
+        thread_id=thread_id,
+        memory_id=memory_id,
+        agent_id=agent_id,
+    )
+
     msgs = (
-        db.query(Message)
-        .filter(Message.session_id == session_id)
-        .filter(Message.user_turn >= start_ut)
-        .filter(Message.user_turn <= to_user_turn)
+        _build_scope_query(
+            db,
+            session_id=session_id,
+            scope_type=effective_scope,
+            thread_id=thread_id,
+            memory_id=memory_id,
+            agent_id=agent_id,
+        )
+        .filter(Message.user_turn.in_(scoped_user_turns))
         .order_by(Message.turn_id.asc())
         .all()
+        if scoped_user_turns
+        else []
     )
 
     if not msgs:
@@ -251,6 +337,10 @@ def run_s4(
     existed = (
         db.query(SummaryS4)
         .filter(SummaryS4.session_id == session_id)
+        .filter(SummaryS4.scope_type == effective_scope)
+        .filter(SummaryS4.thread_id == thread_id)
+        .filter(SummaryS4.memory_id == memory_id)
+        .filter(SummaryS4.agent_id == agent_id)
         .filter(SummaryS4.to_turn == to_turn)
         .first()
     )
@@ -264,11 +354,14 @@ def run_s4(
     trace_thread_id = thread_id or getattr(first_msg, "thread_id", None)
     trace_memory_id = memory_id or getattr(first_msg, "memory_id", None)
     trace_agent_id = agent_id or getattr(first_msg, "agent_id", None)
-    dedupe_key = f"s4:{session_id}:{from_turn}:{to_turn}:{summary_version}"
+    dedupe_key = (
+        f"s4:{effective_scope}:{trace_thread_id}:{trace_memory_id}:{trace_agent_id}:"
+        f"{to_turn}:v{summary_version}"
+    )
 
     row = SummaryS4(
         session_id=session_id,
-        scope_type="session",
+        scope_type=effective_scope,
         thread_id=trace_thread_id,
         memory_id=trace_memory_id,
         agent_id=trace_agent_id,
@@ -281,8 +374,14 @@ def run_s4(
         created_at=_now(),
         meta_json=_safe_json_dumps(
             {
+                "scope_type": effective_scope,
+                "thread_id": trace_thread_id,
+                "memory_id": trace_memory_id,
+                "agent_id": trace_agent_id,
                 "to_user_turn": to_user_turn,
                 "window_user_turn": window_user_turn,
+                "summary_version": summary_version,
+                "dedupe_key": dedupe_key,
             }
         ),
     )
@@ -311,15 +410,32 @@ def run_s60(
 ) -> Dict[str, Any]:
     """长期总结：你现在要的是 30 轮 user 消息。"""
 
-    start_ut = max(1, to_user_turn - window_user_turn + 1)
+    scope_type = "memory"
+    scoped_user_turns = _resolve_scope_user_turns(
+        db,
+        session_id=session_id,
+        to_user_turn=to_user_turn,
+        window_user_turn=window_user_turn,
+        scope_type=scope_type,
+        thread_id=thread_id,
+        memory_id=memory_id,
+        agent_id=agent_id,
+    )
 
     msgs = (
-        db.query(Message)
-        .filter(Message.session_id == session_id)
-        .filter(Message.user_turn >= start_ut)
-        .filter(Message.user_turn <= to_user_turn)
+        _build_scope_query(
+            db,
+            session_id=session_id,
+            scope_type=scope_type,
+            thread_id=thread_id,
+            memory_id=memory_id,
+            agent_id=agent_id,
+        )
+        .filter(Message.user_turn.in_(scoped_user_turns))
         .order_by(Message.turn_id.asc())
         .all()
+        if scoped_user_turns
+        else []
     )
 
     if not msgs:
@@ -331,6 +447,10 @@ def run_s60(
     existed = (
         db.query(SummaryS60)
         .filter(SummaryS60.session_id == session_id)
+        .filter(SummaryS60.scope_type == scope_type)
+        .filter(SummaryS60.thread_id == thread_id)
+        .filter(SummaryS60.memory_id == memory_id)
+        .filter(SummaryS60.agent_id == agent_id)
         .filter(SummaryS60.to_turn == to_turn)
         .first()
     )
@@ -344,11 +464,14 @@ def run_s60(
     trace_thread_id = thread_id or getattr(first_msg, "thread_id", None)
     trace_memory_id = memory_id or getattr(first_msg, "memory_id", None)
     trace_agent_id = agent_id or getattr(first_msg, "agent_id", None)
-    dedupe_key = f"s60:{session_id}:{from_turn}:{to_turn}:{summary_version}"
+    dedupe_key = (
+        f"s60:{scope_type}:{trace_thread_id}:{trace_memory_id}:{trace_agent_id}:"
+        f"{to_turn}:v{summary_version}"
+    )
 
     row = SummaryS60(
         session_id=session_id,
-        scope_type="session",
+        scope_type=scope_type,
         thread_id=trace_thread_id,
         memory_id=trace_memory_id,
         agent_id=trace_agent_id,
@@ -361,8 +484,14 @@ def run_s60(
         created_at=_now(),
         meta_json=_safe_json_dumps(
             {
+                "scope_type": scope_type,
+                "thread_id": trace_thread_id,
+                "memory_id": trace_memory_id,
+                "agent_id": trace_agent_id,
                 "to_user_turn": to_user_turn,
                 "window_user_turn": window_user_turn,
+                "summary_version": summary_version,
+                "dedupe_key": dedupe_key,
             }
         ),
     )
