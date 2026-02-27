@@ -4,6 +4,7 @@ import os
 import json
 import uuid
 import re
+from datetime import datetime
 from typing import Any, Dict, List, Optional, AsyncGenerator, Tuple
 
 import httpx
@@ -54,19 +55,51 @@ def _safe_json_loads(s: str):
     except Exception:
         return s
 
-def _pick_session_id(payload: Dict[str, Any], req: Request) -> str:
-    h = req.headers.get("x-session-id") or req.headers.get("X-Session-Id")
-    if h:
-        return f"rk:{h}"
-    if isinstance(payload.get("user"), str) and payload["user"].strip():
-        return f"rk:{payload['user'].strip()}"
-    meta = payload.get("metadata") or {}
-    if isinstance(meta, dict):
-        for k in ("session_id", "conversation_id", "chat_id"):
-            v = meta.get(k)
-            if isinstance(v, str) and v.strip():
-                return f"rk:{v.strip()}"
-    return f"rk:tmp:{uuid.uuid4().hex[:12]}"
+def _generate_thread_id() -> str:
+    ts = datetime.utcnow().strftime("%Y%m%d%H%M")
+    return f"rk:th:{ts}:{uuid.uuid4().hex[:12]}"
+
+
+def _resolve_identity(payload: Dict[str, Any], req: Request) -> Dict[str, str]:
+    metadata = payload.get("metadata") if isinstance(payload, dict) else {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    def _pick_str(*values: Any) -> Optional[str]:
+        for value in values:
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    thread_id = _pick_str(
+        req.headers.get("x-thread-id"),
+        metadata.get("thread_id"),
+        req.headers.get("x-session-id"),
+    ) or _generate_thread_id()
+
+    memory_id = _pick_str(
+        req.headers.get("x-memory-id"),
+        metadata.get("memory_id"),
+        os.getenv("MEMORY_ID_DEFAULT", ""),
+    ) or thread_id
+
+    agent_id = _pick_str(
+        metadata.get("agent_id"),
+        os.getenv("AGENT_ID_DEFAULT", ""),
+    ) or ""
+
+    raw_s4_scope = _pick_str(metadata.get("s4_scope"))
+    s4_scope = raw_s4_scope.lower() if raw_s4_scope else "thread"
+    if s4_scope not in {"thread", "memory", "auto"}:
+        s4_scope = "thread"
+    effective_s4_scope = "thread" if s4_scope == "auto" else s4_scope
+
+    return {
+        "thread_id": thread_id,
+        "memory_id": memory_id,
+        "agent_id": agent_id,
+        "s4_scope": effective_s4_scope,
+    }
 
 def _last_user_text(messages: List[Dict[str, Any]]) -> str:
     for m in reversed(messages or []):
@@ -495,7 +528,12 @@ async def _proxy_stream_and_store(
 @router.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     payload: Dict[str, Any] = await request.json()
-    session_id = _pick_session_id(payload, request)
+    identity = _resolve_identity(payload, request)
+    thread_id = identity["thread_id"]
+    memory_id = identity["memory_id"]
+    agent_id = identity["agent_id"]
+    s4_scope = identity["s4_scope"]
+    session_id = thread_id
 
     messages = payload.get("messages") or []
     if not isinstance(messages, list):
@@ -573,6 +611,10 @@ async def chat_completions(request: Request):
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
                 "X-Upstream-URL": upstream_url,
+                "X-Thread-Id": thread_id,
+                "X-Memory-Id": memory_id,
+                "X-Agent-Id": agent_id,
+                "X-S4-Scope": s4_scope,
                 "X-Session-Id": session_id,
             },
         )
@@ -586,6 +628,10 @@ async def chat_completions(request: Request):
             else:
                 resp = JSONResponse({"error": {"message": r.text}}, status_code=r.status_code)
             resp.headers["x-upstream-url"] = upstream_url
+            resp.headers["x-thread-id"] = thread_id
+            resp.headers["x-memory-id"] = memory_id
+            resp.headers["x-agent-id"] = agent_id
+            resp.headers["x-s4-scope"] = s4_scope
             resp.headers["x-session-id"] = session_id
             return resp
 
@@ -618,5 +664,9 @@ async def chat_completions(request: Request):
 
     resp = JSONResponse(data)
     resp.headers["x-upstream-url"] = upstream_url
+    resp.headers["x-thread-id"] = thread_id
+    resp.headers["x-memory-id"] = memory_id
+    resp.headers["x-agent-id"] = agent_id
+    resp.headers["x-s4-scope"] = s4_scope
     resp.headers["x-session-id"] = session_id
     return resp
