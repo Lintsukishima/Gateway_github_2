@@ -1,10 +1,9 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Integer, DateTime, Text, ForeignKey
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
+
 from .session import Base
-from sqlalchemy import Boolean, Integer
-from sqlalchemy import Integer
 
 def gen_id() -> str:
     return str(uuid.uuid4())
@@ -41,6 +40,9 @@ class Message(Base):
     lang = Column(String, default="mix")
     created_at = Column(DateTime, default=datetime.utcnow)
     platform = Column(String, index=True, default="unknown")
+    thread_id = Column(String, index=True, nullable=True)
+    memory_id = Column(String, index=True, nullable=True)
+    agent_id = Column(String, index=True, nullable=True)
 
     meta_json = Column(Text, default="{}")
 
@@ -50,6 +52,12 @@ class SummaryS4(Base):
     __tablename__ = "summaries_s4"
     id = Column(String, primary_key=True, default=gen_id)
     session_id = Column(String, index=True, nullable=False)
+    scope_type = Column(String, index=True, nullable=True)
+    thread_id = Column(String, index=True, nullable=True)
+    memory_id = Column(String, index=True, nullable=True)
+    agent_id = Column(String, index=True, nullable=True)
+    summary_version = Column(Integer, nullable=True, default=1)
+    dedupe_key = Column(String, index=True, nullable=True)
 
     from_turn = Column(Integer, index=True, nullable=False)
     to_turn = Column(Integer, index=True, nullable=False)
@@ -63,6 +71,12 @@ class SummaryS60(Base):
     __tablename__ = "summaries_s60"
     id = Column(String, primary_key=True, default=gen_id)
     session_id = Column(String, index=True, nullable=False)
+    scope_type = Column(String, index=True, nullable=True)
+    thread_id = Column(String, index=True, nullable=True)
+    memory_id = Column(String, index=True, nullable=True)
+    agent_id = Column(String, index=True, nullable=True)
+    summary_version = Column(Integer, nullable=True, default=1)
+    dedupe_key = Column(String, index=True, nullable=True)
 
     from_turn = Column(Integer, index=True, nullable=False)
     to_turn = Column(Integer, index=True, nullable=False)
@@ -106,4 +120,3 @@ class OutboxMessage(Base):
     model_trace_json = Column(Text, default="{}") # 简短理由
     created_at = Column(DateTime, default=datetime.utcnow)
     meta_json = Column(Text, default="{}")
-

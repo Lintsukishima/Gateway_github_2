@@ -70,6 +70,9 @@ def chat_once(
     s60_every_user_turns: int = 30,
     s4_window_user_turns: int = 4,
     s60_window_user_turns: int = 30,
+    thread_id: Optional[str] = None,
+    memory_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
 ) -> ChatOnceResult:
     """
     写入一轮 user + assistant 消息，并按 user_turn 触发滚动总结：
@@ -94,6 +97,9 @@ def chat_once(
         role="user",
         content=user_text,
         created_at=_now_utc(),
+        thread_id=thread_id,
+        memory_id=memory_id,
+        agent_id=agent_id,
         meta_json="{}",
     )
     db.add(m_user)
@@ -106,6 +112,9 @@ def chat_once(
         role="assistant",
         content=assistant_text,
         created_at=_now_utc(),
+        thread_id=thread_id,
+        memory_id=memory_id,
+        agent_id=agent_id,
         meta_json="{}",
     )
     db.add(m_asst)
@@ -129,6 +138,9 @@ def chat_once(
             to_user_turn=user_turn,
             window_user_turn=s4_window_user_turns,
             model_name=model_name,
+            thread_id=thread_id,
+            memory_id=memory_id,
+            agent_id=agent_id,
         )
 
     if triggered_s60:
@@ -138,6 +150,9 @@ def chat_once(
             to_user_turn=user_turn,
             window_user_turn=s60_window_user_turns,
             model_name=model_name,
+            thread_id=thread_id,
+            memory_id=memory_id,
+            agent_id=agent_id,
         )
 
     return ChatOnceResult(
