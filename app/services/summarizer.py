@@ -95,6 +95,49 @@ def _safe_json_loads(s: Optional[str]) -> Optional[Dict[str, Any]]:
         return {"_raw": s}
 
 
+def _count_cjk_chars(text: str) -> int:
+    return sum(1 for ch in text if "一" <= ch <= "鿿")
+
+
+def _mojibake_score(text: str) -> int:
+    if not text:
+        return 0
+    markers = ("Ã", "Â", "æ", "ä", "å", "ç", "ð", "", "", "")
+    return sum(text.count(m) for m in markers)
+
+
+def _maybe_repair_mojibake_text(text: str) -> str:
+    """尝试修复“UTF-8 bytes 被按 latin-1/cp1252 解码后再传输”的文本污染。"""
+    if not text:
+        return text
+
+    best = text
+    best_gain = 0
+
+    for enc in ("latin-1", "cp1252"):
+        try:
+            candidate = text.encode(enc).decode("utf-8")
+        except Exception:
+            continue
+
+        gain = (_count_cjk_chars(candidate) - _count_cjk_chars(best)) + (_mojibake_score(best) - _mojibake_score(candidate))
+        if gain > best_gain:
+            best = candidate
+            best_gain = gain
+
+    return best
+
+
+def _repair_mojibake_in_obj(obj: Any) -> Any:
+    if isinstance(obj, str):
+        return _maybe_repair_mojibake_text(obj)
+    if isinstance(obj, list):
+        return [_repair_mojibake_in_obj(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _repair_mojibake_in_obj(v) for k, v in obj.items()}
+    return obj
+
+
 # ========= LLM（OpenAI-Compatible）=========
 
 
@@ -161,10 +204,23 @@ def call_llm_json(
         content = content.strip("`")
         content = content.replace("json\n", "", 1).strip()
 
+    repaired_content = _maybe_repair_mojibake_text(content)
+    if repaired_content != content:
+        logger.warning(
+            "LLM content mojibake repaired before JSON parse preview_before=%r preview_after=%r",
+            content[:120],
+            repaired_content[:120],
+        )
+
     try:
-        return json.loads(content)
+        obj = json.loads(repaired_content)
     except Exception as e:
-        raise RuntimeError(f"LLM returned non-JSON: {content[:200]}...") from e
+        raise RuntimeError(f"LLM returned non-JSON: {repaired_content[:200]}...") from e
+
+    repaired_obj = _repair_mojibake_in_obj(obj)
+    if repaired_obj != obj:
+        logger.warning("LLM JSON fields contained mojibake and were repaired")
+    return repaired_obj
 
 
 def _default_summary_schema() -> Dict[str, Any]:
