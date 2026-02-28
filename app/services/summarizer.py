@@ -95,19 +95,24 @@ def _safe_json_loads(s: Optional[str]) -> Optional[Dict[str, Any]]:
         return {"_raw": s}
 
 
-def _cjk_count(s: str) -> int:
+def _count_cjk_chars(s: str) -> int:
     return sum(1 for ch in s if "一" <= ch <= "鿿")
 
 
 def _strip_ctrl(s: str) -> str:
     # 去掉 U+0080..U+009F 控制字符（常见转码噪声）
-    return "".join(ch for ch in s if not ("" <= ch <= ""))
+    return "".join(ch for ch in s if not ("\u0080" <= ch <= "\u009f"))
 
 
 def _mojibake_score(text: str) -> int:
     if not text:
         return 0
-    markers = ("Ã", "Â", "æ", "ä", "å", "ç", "ð")
+
+def _mojibake_score(text: str) -> int:
+    if not text:
+        return 0
+    # 兼容两边：常见“UTF-8 被按 latin-1/cp1252 解码”污染标记 + 控制符噪声
+    markers = ("Ã", "Â", "æ", "ä", "å", "ç", "ð", "\u0085", "\u009d", "\u009f")
     return sum(text.count(m) for m in markers)
 
 
@@ -118,32 +123,38 @@ def _try_recode(s: str, src: str) -> Optional[str]:
         return _strip_ctrl(t)
     except Exception:
         return None
-
+def _maybe_repair_mojibake_text(text: str) -> str:
+    """尝试修复“UTF-8 bytes 被按 latin-1/cp1252 解码后再传输”的文本污染。"""
+    if not text:
+        return text
 
 def _maybe_repair_mojibake_text(text: str) -> str:
     """尝试修复“UTF-8 bytes 被按 latin-1/cp1252 解码后再传输”的文本污染。"""
     if not text:
         return text
 
-    bad_markers = ("Ã", "Â", "æ", "ä", "å")
-    if _cjk_count(text) >= 2 and not any(m in text for m in bad_markers):
+    # 如果本来中文就足够、且没有明显 mojibake 标记，就只做控制字符清理
+    bad_markers = ("Ã", "Â", "æ", "ä", "å", "ç", "ð")
+    if _count_cjk_chars(text) >= 2 and not any(m in text for m in bad_markers):
         return _strip_ctrl(text)
 
     best = text
-    best_score = _cjk_count(text)
-    best_marker_score = _mojibake_score(text)
+    best_cjk = _count_cjk_chars(text)
+    best_marker = _mojibake_score(text)
 
     for src in ("latin-1", "cp1252"):
         candidate = _try_recode(text, src)
         if not candidate:
             continue
 
-        cjk_score = _cjk_count(candidate)
-        marker_score = _mojibake_score(candidate)
-        if cjk_score > best_score or (cjk_score == best_score and marker_score < best_marker_score):
+        cjk = _count_cjk_chars(candidate)
+        marker = _mojibake_score(candidate)
+
+        # 优先让中文数量变多；中文一样多时，选择 mojibake 标记更少的
+        if cjk > best_cjk or (cjk == best_cjk and marker < best_marker):
             best = candidate
-            best_score = cjk_score
-            best_marker_score = marker_score
+            best_cjk = cjk
+            best_marker = marker
 
     return _strip_ctrl(best)
 
@@ -200,23 +211,27 @@ def call_llm_json(
     raw = r.content
     text = raw.decode("utf-8", errors="replace")
 
-    logger.debug(
-        "LLM raw response diagnostics status=%s content_type=%s raw_hex=%s text_preview=%r utf8_preview=%r",
-        r.status_code,
+
+logger.debug(
+    "LLM raw response diagnostics status=%s content_type=%s raw_hex=%s text_preview=%r utf8_preview=%r",
+    r.status_code,
+    r.headers.get("content-type"),
+    raw[:120].hex(),
+    (r.text or "")[:120],
+    text[:120],
+)
+
+if any(m in text[:200] for m in ("Ã", "Â", "æ", "ä", "å", "ç", "ð")):
+    logger.warning(
+        "LLM raw response looks mojibake content_type=%s raw_hex=%s utf8_preview=%r",
         r.headers.get("content-type"),
         raw[:120].hex(),
-        (r.text or "")[:120],
         text[:120],
     )
 
-    if any(m in text[:200] for m in ("Ã", "Â", "æ", "ä", "å")):
-        logger.warning(
-            "LLM raw response looks mojibake content_type=%s raw_hex=%s utf8_preview=%r",
-            r.headers.get("content-type"),
-            raw[:120].hex(),
-            text[:120],
-        )
-
+try:
+    data = json.loads(text)
+...
     try:
         data = json.loads(text)
     except json.JSONDecodeError as e:
