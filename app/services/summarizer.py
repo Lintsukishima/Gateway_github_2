@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -7,6 +8,9 @@ import requests
 from sqlalchemy.orm import Session
 
 from app.db.models import Message, SummaryS4, SummaryS60
+
+
+logger = logging.getLogger(__name__)
 
 # ===== 在文件顶部 imports 下面（或任意位置）新增 =====
 
@@ -129,7 +133,19 @@ def call_llm_json(
 
     r = requests.post(url, headers=headers, json=payload, timeout=timeout_s)
     r.raise_for_status()
-    data = r.json()
+
+    raw = r.content
+    text = raw.decode("utf-8", errors="replace")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        logger.warning(
+            "LLM response JSON decode failed status=%s content_type=%s body_preview=%r",
+            r.status_code,
+            r.headers.get("content-type"),
+            text[:200],
+        )
+        raise RuntimeError("LLM endpoint returned invalid JSON payload") from e
 
     content = (
         data.get("choices", [{}])[0]
@@ -290,7 +306,7 @@ def run_s4(
     memory_id: Optional[str] = None,
     agent_id: Optional[str] = None,
     s4_scope: str = "thread",
-    summary_version: int = 1,
+    summary_version: int = 2,
 ) -> Dict[str, Any]:
     """短期总结：按 user_turn 窗口。"""
 
