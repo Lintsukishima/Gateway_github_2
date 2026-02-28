@@ -235,10 +235,12 @@ def call_llm_json(
     raw = r.content
     text = raw.decode("utf-8", errors="replace")
 
-    logger.debug(
-        "LLM raw response diagnostics status=%s content_type=%s raw_hex=%s text_preview=%r utf8_preview=%r",
+    logger.warning(
+        "LLM raw response diagnostics status=%s content_type=%s requests_encoding=%s apparent_encoding=%s raw_hex=%s text_preview=%r utf8_preview=%r",
         r.status_code,
         r.headers.get("content-type"),
+        getattr(r, "encoding", None),
+        getattr(r, "apparent_encoding", None),
         raw[:120].hex(),
         (r.text or "")[:120],
         text[:120],
