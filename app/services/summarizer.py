@@ -107,26 +107,28 @@ def _strip_ctrl(s: str) -> str:
 def _mojibake_score(text: str) -> int:
     if not text:
         return 0
-
-def _mojibake_score(text: str) -> int:
-    if not text:
-        return 0
     # 兼容两边：常见“UTF-8 被按 latin-1/cp1252 解码”污染标记 + 控制符噪声
     markers = ("Ã", "Â", "æ", "ä", "å", "ç", "ð", "\u0085", "\u009d", "\u009f")
     return sum(text.count(m) for m in markers)
 
 
 def _try_recode(s: str, src: str) -> Optional[str]:
-    try:
-        b = s.encode(src, errors="strict")
-        t = b.decode("utf-8", errors="strict")
-        return _strip_ctrl(t)
-    except Exception:
-        return None
-def _maybe_repair_mojibake_text(text: str) -> str:
-    """尝试修复“UTF-8 bytes 被按 latin-1/cp1252 解码后再传输”的文本污染。"""
-    if not text:
-        return text
+    byte_candidates = []
+    for seed in (s, _strip_ctrl(s)):
+        try:
+            byte_candidates.append(seed.encode(src, errors="strict"))
+        except Exception:
+            continue
+
+    for b in byte_candidates:
+        for decode_errors in ("strict", "replace"):
+            try:
+                t = b.decode("utf-8", errors=decode_errors)
+                return _strip_ctrl(t)
+            except Exception:
+                continue
+    return None
+
 
 def _maybe_repair_mojibake_text(text: str) -> str:
     """尝试修复“UTF-8 bytes 被按 latin-1/cp1252 解码后再传输”的文本污染。"""
@@ -139,14 +141,22 @@ def _maybe_repair_mojibake_text(text: str) -> str:
         return _strip_ctrl(text)
 
     best = text
-    best_cjk = _count_cjk_chars(text)
-    best_marker = _mojibake_score(text)
+    best_cjk = _count_cjk_chars(best)
+    best_marker = _mojibake_score(best)
 
-    for src in ("latin-1", "cp1252"):
-        candidate = _try_recode(text, src)
-        if not candidate:
-            continue
+    candidates = {text}
+    for _ in range(2):
+        next_round = set()
+        for seed in list(candidates):
+            for src in ("latin-1", "cp1252"):
+                candidate = _try_recode(seed, src)
+                if candidate and candidate not in candidates:
+                    next_round.add(candidate)
+        if not next_round:
+            break
+        candidates.update(next_round)
 
+    for candidate in candidates:
         cjk = _count_cjk_chars(candidate)
         marker = _mojibake_score(candidate)
 
@@ -211,27 +221,23 @@ def call_llm_json(
     raw = r.content
     text = raw.decode("utf-8", errors="replace")
 
-
-logger.debug(
-    "LLM raw response diagnostics status=%s content_type=%s raw_hex=%s text_preview=%r utf8_preview=%r",
-    r.status_code,
-    r.headers.get("content-type"),
-    raw[:120].hex(),
-    (r.text or "")[:120],
-    text[:120],
-)
-
-if any(m in text[:200] for m in ("Ã", "Â", "æ", "ä", "å", "ç", "ð")):
-    logger.warning(
-        "LLM raw response looks mojibake content_type=%s raw_hex=%s utf8_preview=%r",
+    logger.debug(
+        "LLM raw response diagnostics status=%s content_type=%s raw_hex=%s text_preview=%r utf8_preview=%r",
+        r.status_code,
         r.headers.get("content-type"),
         raw[:120].hex(),
+        (r.text or "")[:120],
         text[:120],
     )
 
-try:
-    data = json.loads(text)
-...
+    if any(m in text[:200] for m in ("Ã", "Â", "æ", "ä", "å", "ç", "ð", "\u0085")):
+        logger.warning(
+            "LLM raw response looks mojibake content_type=%s raw_hex=%s utf8_preview=%r",
+            r.headers.get("content-type"),
+            raw[:120].hex(),
+            text[:120],
+        )
+
     try:
         data = json.loads(text)
     except json.JSONDecodeError as e:
@@ -262,6 +268,11 @@ try:
         logger.warning(
             "LLM content mojibake repaired before JSON parse preview_before=%r preview_after=%r",
             content[:120],
+            repaired_content[:120],
+        )
+    elif _mojibake_score(repaired_content):
+        logger.warning(
+            "LLM content still contains possible mojibake markers after first-pass repair preview=%r",
             repaired_content[:120],
         )
 
@@ -474,6 +485,13 @@ def run_s4(
 
     transcript = _render_transcript(msgs)
     summary_obj = _summarize_with_optional_llm(transcript, level="短期")
+    logger.debug(
+        "S4 summary preview before persist session_id=%s thread_id=%s to_turn=%s summary=%r",
+        session_id,
+        thread_id,
+        to_turn,
+        summary_obj,
+    )
 
     first_msg = msgs[0]
     trace_thread_id = thread_id or getattr(first_msg, "thread_id", None)
@@ -512,10 +530,21 @@ def run_s4(
     )
     db.add(row)
     db.commit()
+    db.refresh(row)
+
+    persisted_summary = _safe_json_loads(row.summary_json)
+    if persisted_summary != summary_obj:
+        logger.warning(
+            "S4 summary changed after DB persist session_id=%s to_turn=%s before=%r after=%r",
+            session_id,
+            to_turn,
+            summary_obj,
+            persisted_summary,
+        )
 
     return {
         "range": [from_turn, to_turn],
-        "summary": summary_obj,
+        "summary": persisted_summary or summary_obj,
         "created_at": row.created_at.isoformat(),
         "model": model_name,
     }
