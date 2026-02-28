@@ -189,7 +189,7 @@ def chat_once(
             memory_id=memory_id,
             agent_id=agent_id,
             s4_scope=effective_s4_scope,
-            summary_version=1,
+            summary_version=2,
         )
 
     if triggered_s60:
