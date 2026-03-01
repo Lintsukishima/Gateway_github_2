@@ -62,6 +62,67 @@ function Print-DebugHeaders {
   Write-Host ("X-Debug-User-Text-Decoded= " + $txtDecoded)
 }
 
+function Convert-BytesToHex {
+  param(
+    [Parameter(Mandatory = $true)][byte[]]$Bytes,
+    [int]$MaxBytes = 120
+  )
+
+  $slice = $Bytes | Select-Object -First $MaxBytes
+  return (($slice | ForEach-Object { $_.ToString('x2') }) -join '')
+}
+
+function Get-WebResponseBytes {
+  param([Parameter(Mandatory = $true)]$Response)
+
+  if ($null -ne $Response.RawContentStream) {
+    $stream = $Response.RawContentStream
+    if ($stream.CanSeek) {
+      $stream.Position = 0
+    }
+    $ms = New-Object System.IO.MemoryStream
+    $stream.CopyTo($ms)
+    if ($stream.CanSeek) {
+      $stream.Position = 0
+    }
+    return $ms.ToArray()
+  }
+
+  if ($null -ne $Response.Content) {
+    return [System.Text.Encoding]::UTF8.GetBytes([string]$Response.Content)
+  }
+
+  return @()
+}
+
+function Get-JsonWithUtf8Decode {
+  param(
+    [Parameter(Mandatory = $true)][string]$Uri,
+    [string]$Label = ""
+  )
+
+  $default = Invoke-RestMethod -Method Get -Uri $Uri
+  $resp = Invoke-WebRequest -UseBasicParsing -Method Get -Uri $Uri
+  $bytes = Get-WebResponseBytes -Response $resp
+  $hex120 = Convert-BytesToHex -Bytes $bytes -MaxBytes 120
+  $utf8Text = [System.Text.Encoding]::UTF8.GetString($bytes)
+  $utf8Json = $utf8Text | ConvertFrom-Json
+
+  if ($Label) {
+    Write-Host ("`n[debug] $Label raw utf8 hex(120b): " + $hex120)
+    Write-Host "[debug] $Label utf8 text preview(200):"
+  } else {
+    Write-Host ("`n[debug] raw utf8 hex(120b): " + $hex120)
+    Write-Host "[debug] utf8 text preview(200):"
+  }
+  $utf8Text.Substring(0, [Math]::Min(200, $utf8Text.Length))
+
+  return @{
+    Default = $default
+    Utf8Json = $utf8Json
+  }
+}
+
 Write-Host "[debug] thread_id/session_id = $th"
 
 # 第 1 轮：保留响应头用于确认 session 对齐
@@ -98,16 +159,30 @@ $resp1.Content.Substring(0, [Math]::Min(200, $resp1.Content.Length))
   $resp.Content.Substring(0, [Math]::Min(200, $resp.Content.Length))
 }
 
-# 拉 summaries
-$summaries = Invoke-RestMethod -Method Get -Uri "$base/api/v1/sessions/$th/summaries"
+# 拉 summaries（默认路径 + 强制 UTF-8 路径）
+$summariesResult = Get-JsonWithUtf8Decode -Uri "$base/api/v1/sessions/$th/summaries" -Label "summaries"
+$summariesDefault = $summariesResult.Default
+$summariesUtf8 = $summariesResult.Utf8Json
 
-Write-Host "`n[debug] latest s4 summary:"
-if ($summaries.s4 -and $summaries.s4.Count -gt 0) {
-  $summaries.s4[0] | ConvertTo-Json -Depth 50
+Write-Host "`n[debug] latest s4 summary (default path):"
+if ($summariesDefault.s4 -and $summariesDefault.s4.Count -gt 0) {
+  $summariesDefault.s4[0] | ConvertTo-Json -Depth 50
 } else {
   Write-Host "no s4 summary found"
 }
 
-Write-Host "`n[debug] summarizer debug events:"
-$dbg = Invoke-RestMethod -Method Get -Uri "$base/api/v1/sessions/$th/summaries/debug?limit=80"
-$dbg.events | ConvertTo-Json -Depth 50
+Write-Host "`n[debug] latest s4 summary (forced utf8 path):"
+if ($summariesUtf8.s4 -and $summariesUtf8.s4.Count -gt 0) {
+  $summariesUtf8.s4[0] | ConvertTo-Json -Depth 50
+} else {
+  Write-Host "no s4 summary found"
+}
+
+Write-Host "`n[debug] summarizer debug events (default path):"
+$dbgResult = Get-JsonWithUtf8Decode -Uri "$base/api/v1/sessions/$th/summaries/debug?limit=80" -Label "summaries/debug"
+$dbgDefault = $dbgResult.Default
+$dbgUtf8 = $dbgResult.Utf8Json
+$dbgDefault.events | ConvertTo-Json -Depth 50
+
+Write-Host "`n[debug] summarizer debug events (forced utf8 path):"
+$dbgUtf8.events | ConvertTo-Json -Depth 50
