@@ -58,9 +58,14 @@ def _count_scoped_user_turns(
     memory_id: Optional[str],
     agent_id: Optional[str],
 ) -> int:
-    q = db.query(Message).filter(Message.session_id == session_id).filter(Message.role == "user")
+    # NOTE:
+    # - thread scope: count inside the current session/thread timeline.
+    # - memory scope: count across sessions, keyed by memory_id (+agent_id),
+    #   so A/B thread hopping can still accumulate scoped user turns.
+    q = db.query(Message).filter(Message.role == "user")
 
     if scope_type == "thread":
+        q = q.filter(Message.session_id == session_id)
         if thread_id is not None:
             q = q.filter(Message.thread_id == thread_id)
     elif scope_type == "memory":
@@ -68,6 +73,9 @@ def _count_scoped_user_turns(
             q = q.filter(Message.memory_id == memory_id)
         if agent_id is not None:
             q = q.filter(Message.agent_id == agent_id)
+        # Safety fallback: if memory identifiers are missing, avoid scanning global history.
+        if memory_id is None and agent_id is None:
+            q = q.filter(Message.session_id == session_id)
 
     return q.count()
 
