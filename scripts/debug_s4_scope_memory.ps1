@@ -124,10 +124,9 @@ function Extract-S4Entries {
 }
 
 function Get-LatestS4Text {
-  param([Parameter(Mandatory = $false)][AllowNull()]$S4Entries)
+  param([Parameter(Mandatory = $true)]$S4Entries)
 
-  # Force array materialization to avoid PropertyNotFoundStrict on .Count.
-  $arr = @(ConvertTo-Array -Value $S4Entries)
+  $arr = ConvertTo-Array -Value $S4Entries
   if ($arr.Count -eq 0) {
     return ""
   }
@@ -200,8 +199,8 @@ $s4A | ConvertTo-Json -Depth 50
 Write-Host "`n[debug] threadB summaries.s4 (count=$s4BCount, keys=$(Get-ObjectKeys -Obj $sumB)):"
 $s4B | ConvertTo-Json -Depth 50
 
-$s4TextA = Get-LatestS4Text -S4Entries (ConvertTo-Array -Value $s4A)
-$s4TextB = Get-LatestS4Text -S4Entries (ConvertTo-Array -Value $s4B)
+$s4TextA = Get-LatestS4Text -S4Entries $s4A
+$s4TextB = Get-LatestS4Text -S4Entries $s4B
 
 $combinedText = ($s4TextA + "`n" + $s4TextB)
 $relatedToThisRun = ($combinedText -match [Regex]::Escape($runTag)) -or ($combinedText -match "s4m-A") -or ($combinedText -match "s4m-B") -or ($combinedText -match "memory scope check") -or ($combinedText -match "round-")
