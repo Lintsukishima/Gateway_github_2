@@ -16,6 +16,7 @@ $agent = "companion:Lishuo-rui"
 $scope = "memory"
 $base = "http://127.0.0.1:8000"
 $model = "qwen/qwen3-235b-a22b-2507"
+$runTag = "s4-memory-run-$ts"
 
 Write-Host "[debug] validating metadata.s4_scope=memory"
 Write-Host "[debug] threadA=$threadA"
@@ -30,7 +31,7 @@ function Invoke-ChatCompletionUtf8 {
 
   $body = @{
     model = $model
-    messages = @(@{ role = "user"; content = "S4 memory scope 验证 第${Round}轮，thread=${ThreadId}，请保留本轮信息" })
+    messages = @(@{ role = "user"; content = "S4 memory scope check round-${Round}; run=${runTag}; thread=${ThreadId}; keep this info" })
     stream = $false
     metadata = @{
       thread_id = $ThreadId
@@ -121,7 +122,7 @@ $s4TextB = Get-LatestS4Text -Summaries $sumB
 
 $hasS4 = ($sumA.s4 -and $sumA.s4.Count -gt 0) -or ($sumB.s4 -and $sumB.s4.Count -gt 0)
 $combinedText = ($s4TextA + "\n" + $s4TextB)
-$relatedToThisRun = ($combinedText -match "第1轮") -or ($combinedText -match "第2轮") -or ($combinedText -match "第3轮") -or ($combinedText -match "第4轮") -or ($combinedText -match "s4m-A") -or ($combinedText -match "s4m-B")
+$relatedToThisRun = ($combinedText -match [Regex]::Escape($runTag)) -or ($combinedText -match "s4m-A") -or ($combinedText -match "s4m-B")
 
 if ($hasS4 -and $allScopesMemory -and $relatedToThisRun) {
   Write-Host "`nPASS: round4后检测到s4，且x-s4-scope=memory。"
