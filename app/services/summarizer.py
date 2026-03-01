@@ -3,7 +3,7 @@ import logging
 import os
 from collections import deque
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from sqlalchemy.orm import Session
@@ -13,6 +13,11 @@ from app.db.models import Message, SummaryS4, SummaryS60
 
 logger = logging.getLogger(__name__)
 _DEBUG_EVENTS: deque = deque(maxlen=200)
+
+
+
+SUMMARY_VALUE_FIELDS: Tuple[str, ...] = ("goal", "state", "open_loops", "constraints", "tone_notes")
+SUMMARY_LIST_FIELDS: Tuple[str, ...] = ("open_loops", "constraints", "tone_notes")
 
 
 def _push_debug_event(event: Dict[str, Any]) -> None:
@@ -439,42 +444,77 @@ def call_llm_json(
         content = content.strip("`")
         content = content.replace("json\n", "", 1).strip()
 
-    repaired_content = _maybe_repair_mojibake_text(content, session_id=session_id, field_path="$.message.content")
     _push_debug_event(
         {
             "stage": "call_llm_json.message_content",
             "session_id": session_id,
             "content_raw_preview_240": _truncate_preview(content, limit=240),
             "content_raw_hex_120b": _truncate_hex_bytes(content, limit_bytes=120),
-            "content_repaired_preview_240": _truncate_preview(repaired_content, limit=240),
-            "content_repaired_hex_120b": _truncate_hex_bytes(repaired_content, limit_bytes=120),
-            "raw_vs_repaired_changed": repaired_content != content,
         }
     )
 
     if not content:
         raise RuntimeError(f"LLM empty content: {data}")
-    if repaired_content != content:
-        logger.warning(
-            "LLM content mojibake repaired before JSON parse preview_before=%r preview_after=%r",
-            content[:120],
-            repaired_content[:120],
-        )
-    elif _mojibake_score(repaired_content):
-        logger.warning(
-            "LLM content still contains possible mojibake markers after first-pass repair preview=%r",
-            repaired_content[:120],
-        )
 
     try:
-        obj = json.loads(repaired_content)
+        return json.loads(content)
     except Exception as e:
-        raise RuntimeError(f"LLM returned non-JSON: {repaired_content[:200]}...") from e
+        raise RuntimeError(f"LLM returned non-JSON: {content[:200]}...") from e
 
-    repaired_obj = _repair_mojibake_in_obj(obj, session_id=session_id)
-    if repaired_obj != obj:
-        logger.warning("LLM JSON fields contained mojibake and were repaired")
-    return repaired_obj
+
+def _repair_summary_value_fields(
+    obj: Dict[str, Any],
+    *,
+    session_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    repaired = dict(obj)
+    for field in SUMMARY_VALUE_FIELDS:
+        if field not in repaired:
+            continue
+        repaired[field] = _repair_mojibake_in_obj(
+            repaired[field],
+            session_id=session_id,
+            path=f"$.{field}",
+        )
+    return repaired
+
+
+def _validate_summary_schema(obj: Any) -> Optional[str]:
+    if not isinstance(obj, dict):
+        return "summary_not_dict"
+
+    missing = [field for field in SUMMARY_VALUE_FIELDS if field not in obj]
+    if missing:
+        return f"missing_fields:{','.join(missing)}"
+
+    bad_list_fields = [field for field in SUMMARY_LIST_FIELDS if not isinstance(obj.get(field), list)]
+    if bad_list_fields:
+        return f"invalid_list_fields:{','.join(bad_list_fields)}"
+
+    return None
+
+
+def _repair_summary_with_rollback(
+    obj: Dict[str, Any],
+    *,
+    session_id: Optional[str] = None,
+    to_turn: Optional[int] = None,
+) -> Dict[str, Any]:
+    repaired_obj = _repair_summary_value_fields(obj, session_id=session_id)
+    failure_reason = _validate_summary_schema(repaired_obj)
+    if not failure_reason:
+        return repaired_obj
+
+    _push_debug_event(
+        {
+            "stage": "repair.rollback",
+            "session_id": session_id,
+            "to_turn": to_turn,
+            "reason": failure_reason,
+            "schema_fields": list(SUMMARY_VALUE_FIELDS),
+        }
+    )
+    return obj
 
 
 def _default_summary_schema() -> Dict[str, Any]:
@@ -536,7 +576,7 @@ def _summarize_with_optional_llm(transcript: str, *, level: str) -> Dict[str, An
     )
 
     sanitized_obj = _sanitize_summary(transcript, obj)
-    return _repair_mojibake_in_obj(sanitized_obj)
+    return _repair_summary_with_rollback(sanitized_obj)
 
 
 def _summarize_s4_with_debug_events(
@@ -627,7 +667,11 @@ def _summarize_s4_with_debug_events(
         }
     )
 
-    repaired_obj = _repair_mojibake_in_obj(sanitized_obj, session_id=session_id)
+    repaired_obj = _repair_summary_with_rollback(
+        sanitized_obj,
+        session_id=session_id,
+        to_turn=to_turn,
+    )
     _push_debug_event(
         {
             "stage": "summary_after_repair",
