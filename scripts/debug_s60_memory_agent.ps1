@@ -5,7 +5,8 @@ param(
   [int]$Rounds = 4,
   [string]$MemoryId = "mem:nekoyue:core",
   [string]$AgentId = "companion:Lishuo-rui",
-  [string]$Scope = "thread"
+  [string]$Scope = "thread",
+  [switch]$AlternateThread
 )
 
 Set-StrictMode -Version Latest
@@ -25,9 +26,8 @@ Write-Host "[提示] 请先确认服务端已将 S60_EVERY_USER_TURNS 临时设�
 Write-Host "[提示] 当前将以 memory_id='$MemoryId' + agent_id='$AgentId' 做 4 轮请求验证。"
 
 $ts = Get-Date -Format "yyyyMMdd-HHmmss"
-$threadA = "rk:th:s60-a-$ts"
-$threadB = "rk:th:s60-b-$ts"
-$threads = @($threadA, $threadB)
+$threadMain = "rk:th:s60-main-$ts"
+$threadAlt = "rk:th:s60-alt-$ts"
 
 function Invoke-JsonUtf8 {
   param(
@@ -119,13 +119,21 @@ function Print-MemoryHeaders {
   Write-Host ("[round $Round] x-agent-id  = " + $Headers["x-agent-id"])
 }
 
-Write-Host "[debug] thread candidates: $($threads -join ', ')"
+if ($AlternateThread) {
+  Write-Host "[debug] mode=alternate-thread（轮次 thread 在 main/alt 之间交替，通常不会在 4 轮内触发单一 thread 的 S60）"
+  Write-Host "[debug] thread_main=$threadMain"
+  Write-Host "[debug] thread_alt =$threadAlt"
+} else {
+  Write-Host "[debug] mode=single-thread（默认，用同一 thread 跑满 4 轮，便于验证 S60_EVERY_USER_TURNS=4）"
+  Write-Host "[debug] thread_main=$threadMain"
+}
 
-$lastThread = $null
 1..$Rounds | ForEach-Object {
   $round = $_
-  $threadId = $threads[($round - 1) % $threads.Count]
-  $lastThread = $threadId
+  $threadId = $threadMain
+  if ($AlternateThread -and ($round % 2 -eq 0)) {
+    $threadId = $threadAlt
+  }
 
   $body = @{
     model = $Model
@@ -152,12 +160,8 @@ $lastThread = $null
   Write-Host ($resp.Content.Substring(0, [Math]::Min(200, $resp.Content.Length)))
 }
 
-if (-not $lastThread) {
-  throw "未生成有效 thread_id，无法继续查询 summaries。"
-}
-
-Write-Host "`n[debug] 使用第 4 轮 thread_id 查询 summaries: $lastThread"
-$summariesResult = Get-JsonWithUtf8Decode -Uri "$BaseUrl/api/v1/sessions/$lastThread/summaries" -Label "summaries"
+Write-Host "`n[debug] 查询 summaries/debug thread_id=$threadMain"
+$summariesResult = Get-JsonWithUtf8Decode -Uri "$BaseUrl/api/v1/sessions/$threadMain/summaries" -Label "summaries"
 $summariesDefault = $summariesResult.Default
 $summariesUtf8 = $summariesResult.Utf8Json
 
@@ -175,7 +179,7 @@ if ($summariesUtf8.s60 -and $summariesUtf8.s60.Count -gt 0) {
   Write-Host "no s60 summary found"
 }
 
-$dbgResult = Get-JsonWithUtf8Decode -Uri "$BaseUrl/api/v1/sessions/$lastThread/summaries/debug?limit=120" -Label "summaries/debug"
+$dbgResult = Get-JsonWithUtf8Decode -Uri "$BaseUrl/api/v1/sessions/$threadMain/summaries/debug?limit=120" -Label "summaries/debug"
 $dbgDefault = $dbgResult.Default
 $dbgUtf8 = $dbgResult.Utf8Json
 
