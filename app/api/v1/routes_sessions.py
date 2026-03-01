@@ -1,5 +1,6 @@
 import json
 from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session as OrmSession
 from app.db.session import SessionLocal
 from app.db.models import SummaryS4, SummaryS60
@@ -26,7 +27,8 @@ def get_summaries(session_id: str, db: OrmSession = Depends(get_db)):
             .order_by(SummaryS60.to_turn.desc())
             .limit(2).all())
 
-    return {
+    return JSONResponse(
+        content={
         "s4": [{
             "range": [r.from_turn, r.to_turn],
             "summary": json.loads(r.summary_json),
@@ -37,15 +39,20 @@ def get_summaries(session_id: str, db: OrmSession = Depends(get_db)):
             "summary": json.loads(r.summary_json),
             "created_at": r.created_at.isoformat()
         } for r in s60],
-    }
+        },
+        media_type="application/json; charset=utf-8",
+    )
 
 
 @router.get("/sessions/{session_id}/summaries/debug")
 def get_summaries_debug(session_id: str, limit: int = 80):
-    return {
-        "session_id": session_id,
-        "events": get_recent_debug_events(session_id=session_id, limit=limit),
-    }
+    return JSONResponse(
+        content={
+            "session_id": session_id,
+            "events": get_recent_debug_events(session_id=session_id, limit=limit),
+        },
+        media_type="application/json; charset=utf-8",
+    )
 
 @router.post("/sessions/{session_id}/proactive/enable")
 def enable_proactive(session_id: str, db: OrmSession = Depends(get_db)):
