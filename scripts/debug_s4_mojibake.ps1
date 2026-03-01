@@ -22,17 +22,21 @@ function Invoke-JsonUtf8 {
     [Parameter(Mandatory = $true)][hashtable]$BodyObject
   )
 
+  Write-Host "[debug] Invoke-JsonUtf8 URI = '$Uri'"
+
   $json = $BodyObject | ConvertTo-Json -Depth 50 -Compress
   $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
 
-  # 使用 -UseBasicParsing 避免 WinPS 5.1 的安全提示
-  return Invoke-WebRequest \
-    -UseBasicParsing \
-    -Method Post \
-    -Uri $Uri \
-    -ContentType "application/json; charset=utf-8" \
-    -Headers @{ "Accept" = "application/json" } \
-    -Body $bytes
+  $params = @{
+    Uri             = $Uri.Trim()
+    Method          = 'Post'
+    ContentType     = 'application/json; charset=utf-8'
+    Headers         = @{ "Accept" = "application/json" }
+    Body            = $bytes
+    UseBasicParsing = $true
+  }
+
+  return Invoke-WebRequest @params
 }
 
 function Print-DebugHeaders {
@@ -68,6 +72,7 @@ function Convert-BytesToHex {
     [int]$MaxBytes = 120
   )
 
+  if (-not $Bytes) { return "" }
   $slice = $Bytes | Select-Object -First $MaxBytes
   return (($slice | ForEach-Object { $_.ToString('x2') }) -join '')
 }
@@ -92,7 +97,7 @@ function Get-WebResponseBytes {
     return [System.Text.Encoding]::UTF8.GetBytes([string]$Response.Content)
   }
 
-  return @()
+  return [byte[]]@()
 }
 
 function Get-JsonWithUtf8Decode {
@@ -115,10 +120,10 @@ function Get-JsonWithUtf8Decode {
     Write-Host ("`n[debug] raw utf8 hex(120b): " + $hex120)
     Write-Host "[debug] utf8 text preview(200):"
   }
-  $utf8Text.Substring(0, [Math]::Min(200, $utf8Text.Length))
+  Write-Host ($utf8Text.Substring(0, [Math]::Min(200, $utf8Text.Length)))
 
-  return @{
-    Default = $default
+  return [pscustomobject]@{
+    Default  = $default
     Utf8Json = $utf8Json
   }
 }
@@ -182,6 +187,7 @@ Write-Host "`n[debug] summarizer debug events (default path):"
 $dbgResult = Get-JsonWithUtf8Decode -Uri "$base/api/v1/sessions/$th/summaries/debug?limit=80" -Label "summaries/debug"
 $dbgDefault = $dbgResult.Default
 $dbgUtf8 = $dbgResult.Utf8Json
+
 $dbgDefault.events | ConvertTo-Json -Depth 50
 
 Write-Host "`n[debug] summarizer debug events (forced utf8 path):"
