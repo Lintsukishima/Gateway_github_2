@@ -135,6 +135,20 @@ def _ctrl_char_count(text: str) -> int:
     return sum(1 for ch in text if "\u0080" <= ch <= "\u009f")
 
 
+def _bad_latin_run_count(text: str) -> int:
+    bad_chars = {"æ", "å", "ç", "Ã", "Â"}
+    run_count = 0
+    in_run = False
+    for ch in text:
+        if ch in bad_chars:
+            if not in_run:
+                run_count += 1
+                in_run = True
+        else:
+            in_run = False
+    return run_count
+
+
 def _looks_mojibake_text(text: str) -> bool:
     return _mojibake_score(text) > 0 or _ctrl_char_count(text) > 0
 
@@ -167,21 +181,50 @@ def _maybe_repair_mojibake_text(text: str) -> str:
     if _count_cjk_chars(text) >= 2 and not any(m in text for m in bad_markers):
         return _strip_ctrl(text)
 
-    def metrics(s: str) -> tuple[int, int, int]:
-        # 中文越多越好；mojibake 标记和控制字符越少越好
-        return (_count_cjk_chars(s), -_mojibake_score(s), -_ctrl_char_count(s))
+    def metrics(s: str) -> Dict[str, int]:
+        return {
+            "cjk_count": _count_cjk_chars(s),
+            "mojibake_markers": _mojibake_score(s),
+            "replacement_count": s.count("�"),
+            "ctrl_count": _ctrl_char_count(s),
+            "bad_latin_runs": _bad_latin_run_count(s),
+        }
+
+    def ordering_key(m: Dict[str, int]) -> tuple[int, int, int, int, int]:
+        # 优先级：CJK 更多 > mojibake 更少 > 控制/替换字符更少 > 异常拉丁串更少
+        return (
+            m["cjk_count"],
+            -m["mojibake_markers"],
+            -(m["ctrl_count"] + m["replacement_count"]),
+            -m["bad_latin_runs"],
+            -m["replacement_count"],
+        )
+
+    original_score = _mojibake_score(text)
+    max_rounds = 2 + (1 if original_score > 2 else 0) + (1 if original_score > 5 else 0)
 
     best = _strip_ctrl(text)
     best_metrics = metrics(best)
+    best_source = "original"
 
     candidates = {text}
-    for _ in range(2):
+    for round_index in range(max_rounds):
         next_round = set()
         for seed in list(candidates):
             for src in ("latin-1", "cp1252"):
                 candidate = _try_recode(seed, src)
                 if candidate and candidate not in candidates:
                     next_round.add(candidate)
+                    _push_debug_event(
+                        {
+                            "stage": "mojibake.repair_candidate",
+                            "round": round_index + 1,
+                            "src": src,
+                            "seed_preview": seed[:120],
+                            "candidate_preview": candidate[:120],
+                            "candidate_metrics": metrics(candidate),
+                        }
+                    )
         if not next_round:
             break
         candidates.update(next_round)
@@ -190,14 +233,28 @@ def _maybe_repair_mojibake_text(text: str) -> str:
         cleaned = _strip_ctrl(candidate)
         current_metrics = metrics(cleaned)
 
-        # 中文提升判据：优先中文数量提升；若中文不变，则要求污染显著下降
-        if current_metrics > best_metrics:
+        # 统一按指标排序，选择最优候选。
+        if ordering_key(current_metrics) > ordering_key(best_metrics):
             best = cleaned
             best_metrics = current_metrics
+            best_source = "recode" if candidate != text else "original"
 
     # 若没有获得任何提升，保留原文本（仅清理控制字符）避免过修复
     if not _looks_mojibake_text(text):
         return _strip_ctrl(text)
+
+    _push_debug_event(
+        {
+            "stage": "mojibake.repair_decision",
+            "original_preview": text[:120],
+            "selected_preview": best[:120],
+            "selected_source": best_source,
+            "original_metrics": metrics(_strip_ctrl(text)),
+            "selected_metrics": best_metrics,
+            "total_candidates": len(candidates),
+            "max_rounds": max_rounds,
+        }
+    )
 
     return _strip_ctrl(best)
 
