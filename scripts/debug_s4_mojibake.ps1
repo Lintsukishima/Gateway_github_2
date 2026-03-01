@@ -1,3 +1,4 @@
+#requires -version 5.1
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
@@ -36,11 +37,29 @@ function Invoke-JsonUtf8 {
 
 function Print-DebugHeaders {
   param([Parameter(Mandatory = $true)]$Headers)
+
+  $kwHex = $Headers["x-debug-keyword-hex"]
+  $kwB64 = $Headers["x-debug-keyword-b64"]
+  $txtHex = $Headers["x-debug-user-text-hex"]
+  $txtB64 = $Headers["x-debug-user-text-b64"]
+
+  $kwDecoded = ""
+  $txtDecoded = ""
+  if ($kwB64) {
+    $kwDecoded = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($kwB64.Replace('-', '+').Replace('_', '/')))
+  }
+  if ($txtB64) {
+    $txtDecoded = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($txtB64.Replace('-', '+').Replace('_', '/')))
+  }
+
   Write-Host ("X-Session-Id             = " + $Headers["x-session-id"])
   Write-Host ("X-Thread-Id              = " + $Headers["x-thread-id"])
-  Write-Host ("X-Debug-Keyword          = " + $Headers["x-debug-keyword"])
-  Write-Host ("X-Debug-User-Text-Preview= " + $Headers["x-debug-user-text-preview"])
-  Write-Host ("X-Debug-User-Text-Hex    = " + $Headers["x-debug-user-text-hex"])
+  Write-Host ("X-Debug-Keyword-Hex      = " + $kwHex)
+  Write-Host ("X-Debug-Keyword-B64      = " + $kwB64)
+  Write-Host ("X-Debug-Keyword-Decoded  = " + $kwDecoded)
+  Write-Host ("X-Debug-User-Text-Hex    = " + $txtHex)
+  Write-Host ("X-Debug-User-Text-B64    = " + $txtB64)
+  Write-Host ("X-Debug-User-Text-Decoded= " + $txtDecoded)
 }
 
 Write-Host "[debug] thread_id/session_id = $th"

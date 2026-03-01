@@ -4,6 +4,7 @@ import os
 import json
 import uuid
 import re
+import base64
 from datetime import datetime
 from typing import Any, Dict, List, Optional, AsyncGenerator, Tuple
 
@@ -193,12 +194,21 @@ def _build_debug_headers(user_text: str, kw: str) -> Dict[str, str]:
         return {}
 
     preview = (user_text or "")[:120]
-    preview_hex = preview.encode("utf-8", errors="replace")[:120].hex()
+    preview_bytes = preview.encode("utf-8", errors="replace")[:120]
+    preview_hex = preview_bytes.hex()
+    preview_b64 = base64.urlsafe_b64encode(preview_bytes).decode("ascii")
+
     keyword_preview = (kw or "")[:120]
+    keyword_bytes = keyword_preview.encode("utf-8", errors="replace")[:120]
+    keyword_hex = keyword_bytes.hex()
+    keyword_b64 = base64.urlsafe_b64encode(keyword_bytes).decode("ascii")
+
     return {
-        "X-Debug-User-Text-Preview": preview,
+        # headers 必须保持 latin-1/ASCII 安全，中文放 hex/base64 回传
         "X-Debug-User-Text-Hex": preview_hex,
-        "X-Debug-Keyword": keyword_preview,
+        "X-Debug-User-Text-B64": preview_b64,
+        "X-Debug-Keyword-Hex": keyword_hex,
+        "X-Debug-Keyword-B64": keyword_b64,
     }
 
 def _parse_stream_flag(body: Dict[str, Any]) -> bool:
