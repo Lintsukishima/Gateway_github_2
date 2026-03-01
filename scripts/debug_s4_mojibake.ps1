@@ -107,3 +107,7 @@ if ($summaries.s4 -and $summaries.s4.Count -gt 0) {
 } else {
   Write-Host "no s4 summary found"
 }
+
+Write-Host "`n[debug] summarizer debug events:"
+$dbg = Invoke-RestMethod -Method Get -Uri "$base/api/v1/sessions/$th/summaries/debug?limit=80"
+$dbg.events | ConvertTo-Json -Depth 50

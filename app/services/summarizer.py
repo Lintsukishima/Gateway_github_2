@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -11,6 +12,24 @@ from app.db.models import Message, SummaryS4, SummaryS60
 
 
 logger = logging.getLogger(__name__)
+_DEBUG_EVENTS: deque = deque(maxlen=200)
+
+
+def _push_debug_event(event: Dict[str, Any]) -> None:
+    try:
+        payload = {"ts": _now().isoformat(), **(event or {})}
+        _DEBUG_EVENTS.append(payload)
+    except Exception:
+        pass
+
+
+def get_recent_debug_events(session_id: Optional[str] = None, limit: int = 80) -> List[Dict[str, Any]]:
+    items = list(_DEBUG_EVENTS)
+    if session_id:
+        items = [x for x in items if x.get("session_id") in (None, session_id)]
+    if limit > 0:
+        items = items[-limit:]
+    return items
 
 # ===== 在文件顶部 imports 下面（或任意位置）新增 =====
 
@@ -245,6 +264,17 @@ def call_llm_json(
         (r.text or "")[:120],
         text[:120],
     )
+    _push_debug_event(
+        {
+            "stage": "call_llm_json.raw_response",
+            "content_type": r.headers.get("content-type"),
+            "requests_encoding": getattr(r, "encoding", None),
+            "apparent_encoding": getattr(r, "apparent_encoding", None),
+            "raw_hex_120": raw[:120].hex(),
+            "requests_text_120": (r.text or "")[:120],
+            "forced_utf8_120": text[:120],
+        }
+    )
 
     if any(m in text[:200] for m in ("Ã", "Â", "æ", "ä", "å", "ç", "ð", "\u0085")):
         logger.warning(
@@ -259,6 +289,13 @@ def call_llm_json(
             "LLM response decode mismatch requests_text_preview=%r forced_utf8_preview=%r",
             r.text[:120],
             text[:120],
+        )
+        _push_debug_event(
+            {
+                "stage": "call_llm_json.decode_mismatch",
+                "requests_text_120": r.text[:120],
+                "forced_utf8_120": text[:120],
+            }
         )
 
     try:
@@ -516,6 +553,14 @@ def run_s4(
         to_turn,
         summary_obj,
     )
+    _push_debug_event(
+        {
+            "stage": "run_s4.before_persist",
+            "session_id": session_id,
+            "to_turn": to_turn,
+            "summary_preview": str(summary_obj)[:240],
+        }
+    )
 
     first_msg = msgs[0]
     trace_thread_id = thread_id or getattr(first_msg, "thread_id", None)
@@ -564,6 +609,15 @@ def run_s4(
             to_turn,
             summary_obj,
             persisted_summary,
+        )
+        _push_debug_event(
+            {
+                "stage": "run_s4.after_persist_changed",
+                "session_id": session_id,
+                "to_turn": to_turn,
+                "before_preview": str(summary_obj)[:240],
+                "after_preview": str(persisted_summary)[:240],
+            }
         )
 
     return {
