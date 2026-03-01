@@ -112,6 +112,14 @@ def _mojibake_score(text: str) -> int:
     return sum(text.count(m) for m in markers)
 
 
+def _ctrl_char_count(text: str) -> int:
+    return sum(1 for ch in text if "\u0080" <= ch <= "\u009f")
+
+
+def _looks_mojibake_text(text: str) -> bool:
+    return _mojibake_score(text) > 0 or _ctrl_char_count(text) > 0
+
+
 def _try_recode(s: str, src: str) -> Optional[str]:
     byte_candidates = []
     for seed in (s, _strip_ctrl(s)):
@@ -140,9 +148,12 @@ def _maybe_repair_mojibake_text(text: str) -> str:
     if _count_cjk_chars(text) >= 2 and not any(m in text for m in bad_markers):
         return _strip_ctrl(text)
 
-    best = text
-    best_cjk = _count_cjk_chars(best)
-    best_marker = _mojibake_score(best)
+    def metrics(s: str) -> tuple[int, int, int]:
+        # 中文越多越好；mojibake 标记和控制字符越少越好
+        return (_count_cjk_chars(s), -_mojibake_score(s), -_ctrl_char_count(s))
+
+    best = _strip_ctrl(text)
+    best_metrics = metrics(best)
 
     candidates = {text}
     for _ in range(2):
@@ -157,14 +168,17 @@ def _maybe_repair_mojibake_text(text: str) -> str:
         candidates.update(next_round)
 
     for candidate in candidates:
-        cjk = _count_cjk_chars(candidate)
-        marker = _mojibake_score(candidate)
+        cleaned = _strip_ctrl(candidate)
+        current_metrics = metrics(cleaned)
 
-        # 优先让中文数量变多；中文一样多时，选择 mojibake 标记更少的
-        if cjk > best_cjk or (cjk == best_cjk and marker < best_marker):
-            best = candidate
-            best_cjk = cjk
-            best_marker = marker
+        # 中文提升判据：优先中文数量提升；若中文不变，则要求污染显著下降
+        if current_metrics > best_metrics:
+            best = cleaned
+            best_metrics = current_metrics
+
+    # 若没有获得任何提升，保留原文本（仅清理控制字符）避免过修复
+    if not _looks_mojibake_text(text):
+        return _strip_ctrl(text)
 
     return _strip_ctrl(best)
 
@@ -221,10 +235,12 @@ def call_llm_json(
     raw = r.content
     text = raw.decode("utf-8", errors="replace")
 
-    logger.debug(
-        "LLM raw response diagnostics status=%s content_type=%s raw_hex=%s text_preview=%r utf8_preview=%r",
+    logger.warning(
+        "LLM raw response diagnostics status=%s content_type=%s requests_encoding=%s apparent_encoding=%s raw_hex=%s text_preview=%r utf8_preview=%r",
         r.status_code,
         r.headers.get("content-type"),
+        getattr(r, "encoding", None),
+        getattr(r, "apparent_encoding", None),
         raw[:120].hex(),
         (r.text or "")[:120],
         text[:120],
@@ -235,6 +251,13 @@ def call_llm_json(
             "LLM raw response looks mojibake content_type=%s raw_hex=%s utf8_preview=%r",
             r.headers.get("content-type"),
             raw[:120].hex(),
+            text[:120],
+        )
+
+    if r.text and text and r.text[:120] != text[:120]:
+        logger.warning(
+            "LLM response decode mismatch requests_text_preview=%r forced_utf8_preview=%r",
+            r.text[:120],
             text[:120],
         )
 
@@ -345,7 +368,8 @@ def _summarize_with_optional_llm(transcript: str, *, level: str) -> Dict[str, An
         temperature=0.2,
     )
 
-    return _sanitize_summary(transcript, obj)
+    sanitized_obj = _sanitize_summary(transcript, obj)
+    return _repair_mojibake_in_obj(sanitized_obj)
 
 
 def _build_scope_query(

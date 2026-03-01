@@ -4,6 +4,7 @@ import os
 import json
 import uuid
 import re
+import base64
 from datetime import datetime
 from typing import Any, Dict, List, Optional, AsyncGenerator, Tuple
 
@@ -32,6 +33,7 @@ LOCAL_MCP_GATEWAY_URL = os.getenv(
     f"{LOCAL_MCP_BASE}/api/v1/mcp/gateway_ctx"
 ).strip()
 LOCAL_MCP_TIMEOUT = float(os.getenv("LOCAL_MCP_TIMEOUT", "20"))
+OPENAI_PROXY_DEBUG_ECHO = os.getenv("OPENAI_PROXY_DEBUG_ECHO", "0") == "1"
 
 # -----------------------------
 # DB helper
@@ -185,6 +187,29 @@ def _build_upstream_headers() -> Dict[str, str]:
     if title:
         headers["X-Title"] = title
     return headers
+
+
+def _build_debug_headers(user_text: str, kw: str) -> Dict[str, str]:
+    if not OPENAI_PROXY_DEBUG_ECHO:
+        return {}
+
+    preview = (user_text or "")[:120]
+    preview_bytes = preview.encode("utf-8", errors="replace")[:120]
+    preview_hex = preview_bytes.hex()
+    preview_b64 = base64.urlsafe_b64encode(preview_bytes).decode("ascii")
+
+    keyword_preview = (kw or "")[:120]
+    keyword_bytes = keyword_preview.encode("utf-8", errors="replace")[:120]
+    keyword_hex = keyword_bytes.hex()
+    keyword_b64 = base64.urlsafe_b64encode(keyword_bytes).decode("ascii")
+
+    return {
+        # headers 必须保持 latin-1/ASCII 安全，中文放 hex/base64 回传
+        "X-Debug-User-Text-Hex": preview_hex,
+        "X-Debug-User-Text-B64": preview_b64,
+        "X-Debug-Keyword-Hex": keyword_hex,
+        "X-Debug-Keyword-B64": keyword_b64,
+    }
 
 def _parse_stream_flag(body: Dict[str, Any]) -> bool:
     sv = body.get("stream", False)
@@ -557,6 +582,7 @@ async def chat_completions(request: Request):
 
     # ✅ 统一入口：每轮强制走本机 MCP gateway_ctx，proxy 不再直连 Dify
     anchor_block = ""
+    kw = ""
     if ANCHOR_INJECT_ENABLED and FORCE_GATEWAY_EVERY_TURN:
         kw = _extract_keywords(user_text, k=2)
         # 使用稳定的会话标识，避免每次请求的 user 变化
@@ -596,6 +622,7 @@ async def chat_completions(request: Request):
 
     # 给你加个可观测：返回上游地址
     if stream:
+        debug_headers = _build_debug_headers(user_text, kw if ANCHOR_INJECT_ENABLED and FORCE_GATEWAY_EVERY_TURN else "")
         return StreamingResponse(
             _proxy_stream_and_store(
                 upstream_url,
@@ -616,6 +643,7 @@ async def chat_completions(request: Request):
                 "X-Agent-Id": agent_id,
                 "X-S4-Scope": s4_scope,
                 "X-Session-Id": session_id,
+                **debug_headers,
             },
         )
 
@@ -633,6 +661,8 @@ async def chat_completions(request: Request):
             resp.headers["x-agent-id"] = agent_id
             resp.headers["x-s4-scope"] = s4_scope
             resp.headers["x-session-id"] = session_id
+            for k, v in _build_debug_headers(user_text, kw if ANCHOR_INJECT_ENABLED and FORCE_GATEWAY_EVERY_TURN else "").items():
+                resp.headers[k] = v
             return resp
 
         data = r.json()
@@ -669,4 +699,6 @@ async def chat_completions(request: Request):
     resp.headers["x-agent-id"] = agent_id
     resp.headers["x-s4-scope"] = s4_scope
     resp.headers["x-session-id"] = session_id
+    for k, v in _build_debug_headers(user_text, kw if ANCHOR_INJECT_ENABLED and FORCE_GATEWAY_EVERY_TURN else "").items():
+        resp.headers[k] = v
     return resp
