@@ -195,7 +195,12 @@ def _try_recode(s: str, src: str) -> Optional[str]:
     return None
 
 
-def _maybe_repair_mojibake_text(text: str) -> str:
+def _maybe_repair_mojibake_text(
+    text: str,
+    *,
+    session_id: Optional[str] = None,
+    field_path: Optional[str] = None,
+) -> str:
     """尝试修复“UTF-8 bytes 被按 latin-1/cp1252 解码后再传输”的文本污染。"""
     if not text:
         return text
@@ -208,9 +213,9 @@ def _maybe_repair_mojibake_text(text: str) -> str:
     def metrics(s: str) -> Dict[str, int]:
         return {
             "cjk_count": _count_cjk_chars(s),
-            "mojibake_markers": _mojibake_score(s),
-            "replacement_count": s.count("�"),
-            "ctrl_count": _ctrl_char_count(s),
+            "mojibake_marker_count": _mojibake_score(s),
+            "replacement_char_count": s.count("�"),
+            "ctrl_char_count": _ctrl_char_count(s),
             "bad_latin_runs": _bad_latin_run_count(s),
         }
 
@@ -218,10 +223,10 @@ def _maybe_repair_mojibake_text(text: str) -> str:
         # 优先级：CJK 更多 > mojibake 更少 > 控制/替换字符更少 > 异常拉丁串更少
         return (
             m["cjk_count"],
-            -m["mojibake_markers"],
-            -(m["ctrl_count"] + m["replacement_count"]),
+            -m["mojibake_marker_count"],
+            -(m["ctrl_char_count"] + m["replacement_char_count"]),
             -m["bad_latin_runs"],
-            -m["replacement_count"],
+            -m["replacement_char_count"],
         )
 
     original_score = _mojibake_score(text)
@@ -229,26 +234,15 @@ def _maybe_repair_mojibake_text(text: str) -> str:
 
     best = _strip_ctrl(text)
     best_metrics = metrics(best)
-    best_source = "original"
 
     candidates = {text}
-    for round_index in range(max_rounds):
+    for _ in range(max_rounds):
         next_round = set()
         for seed in list(candidates):
             for src in ("latin-1", "cp1252"):
                 candidate = _try_recode(seed, src)
                 if candidate and candidate not in candidates:
                     next_round.add(candidate)
-                    _push_debug_event(
-                        {
-                            "stage": "mojibake.repair_candidate",
-                            "round": round_index + 1,
-                            "src": src,
-                            "seed_preview": seed[:120],
-                            "candidate_preview": candidate[:120],
-                            "candidate_metrics": metrics(candidate),
-                        }
-                    )
         if not next_round:
             break
         candidates.update(next_round)
@@ -261,20 +255,52 @@ def _maybe_repair_mojibake_text(text: str) -> str:
         if ordering_key(current_metrics) > ordering_key(best_metrics):
             best = cleaned
             best_metrics = current_metrics
-            best_source = "recode" if candidate != text else "original"
 
     # 若没有获得任何提升，保留原文本（仅清理控制字符）避免过修复
     if not _looks_mojibake_text(text):
         return _strip_ctrl(text)
 
+    base_clean = _strip_ctrl(text)
+    latin1_utf8 = _try_recode(base_clean, "latin-1")
+    cp1252_utf8 = _try_recode(base_clean, "cp1252")
+
+    candidate_scores: Dict[str, Dict[str, Any]] = {
+        "raw": metrics(base_clean),
+        "latin1_utf8": metrics(latin1_utf8) if latin1_utf8 else {"decode_failed": 1},
+        "cp1252_utf8": metrics(cp1252_utf8) if cp1252_utf8 else {"decode_failed": 1},
+    }
+
+    chosen = "raw"
+    if latin1_utf8 and _strip_ctrl(latin1_utf8) == best:
+        chosen = "latin1_utf8"
+    elif cp1252_utf8 and _strip_ctrl(cp1252_utf8) == best:
+        chosen = "cp1252_utf8"
+
+    raw_metrics = candidate_scores["raw"]
+    chosen_metrics = metrics(best)
+    reason = "keep_raw_no_improvement"
+    if chosen != "raw":
+        if chosen_metrics["cjk_count"] > raw_metrics["cjk_count"]:
+            reason = "higher_cjk_lower_noise"
+        elif (
+            chosen_metrics["mojibake_marker_count"] < raw_metrics["mojibake_marker_count"]
+            or chosen_metrics["ctrl_char_count"] < raw_metrics["ctrl_char_count"]
+            or chosen_metrics["replacement_char_count"] < raw_metrics["replacement_char_count"]
+        ):
+            reason = "lower_noise"
+        else:
+            reason = "better_ordering_score"
+
     _push_debug_event(
         {
-            "stage": "mojibake.repair_decision",
-            "original_preview": text[:120],
+            "stage": "repair.decision",
+            "session_id": session_id,
+            "field_path": field_path,
+            "raw_preview": text[:120],
+            "candidate_scores": candidate_scores,
+            "chosen": chosen,
+            "reason": reason,
             "selected_preview": best[:120],
-            "selected_source": best_source,
-            "original_metrics": metrics(_strip_ctrl(text)),
-            "selected_metrics": best_metrics,
             "total_candidates": len(candidates),
             "max_rounds": max_rounds,
         }
@@ -283,13 +309,24 @@ def _maybe_repair_mojibake_text(text: str) -> str:
     return _strip_ctrl(best)
 
 
-def _repair_mojibake_in_obj(obj: Any) -> Any:
+def _repair_mojibake_in_obj(
+    obj: Any,
+    *,
+    session_id: Optional[str] = None,
+    path: str = "$",
+) -> Any:
     if isinstance(obj, str):
-        return _maybe_repair_mojibake_text(obj)
+        return _maybe_repair_mojibake_text(obj, session_id=session_id, field_path=path)
     if isinstance(obj, list):
-        return [_repair_mojibake_in_obj(x) for x in obj]
+        return [
+            _repair_mojibake_in_obj(x, session_id=session_id, path=f"{path}[{idx}]")
+            for idx, x in enumerate(obj)
+        ]
     if isinstance(obj, dict):
-        return {k: _repair_mojibake_in_obj(v) for k, v in obj.items()}
+        return {
+            k: _repair_mojibake_in_obj(v, session_id=session_id, path=f"{path}.{k}")
+            for k, v in obj.items()
+        }
     return obj
 
 
@@ -402,7 +439,7 @@ def call_llm_json(
         content = content.strip("`")
         content = content.replace("json\n", "", 1).strip()
 
-    repaired_content = _maybe_repair_mojibake_text(content)
+    repaired_content = _maybe_repair_mojibake_text(content, session_id=session_id, field_path="$.message.content")
     _push_debug_event(
         {
             "stage": "call_llm_json.message_content",
@@ -434,7 +471,7 @@ def call_llm_json(
     except Exception as e:
         raise RuntimeError(f"LLM returned non-JSON: {repaired_content[:200]}...") from e
 
-    repaired_obj = _repair_mojibake_in_obj(obj)
+    repaired_obj = _repair_mojibake_in_obj(obj, session_id=session_id)
     if repaired_obj != obj:
         logger.warning("LLM JSON fields contained mojibake and were repaired")
     return repaired_obj
@@ -590,7 +627,7 @@ def _summarize_s4_with_debug_events(
         }
     )
 
-    repaired_obj = _repair_mojibake_in_obj(sanitized_obj)
+    repaired_obj = _repair_mojibake_in_obj(sanitized_obj, session_id=session_id)
     _push_debug_event(
         {
             "stage": "summary_after_repair",
