@@ -33,14 +33,7 @@ function ConvertTo-Array {
     return @()
   }
 
-  if ($Value -is [System.Array]) {
-    return $Value
-  }
-
-  if ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [string]) -and -not ($Value -is [psobject])) {
-    return @($Value)
-  }
-
+  # Always return a true array so .Count is safe under StrictMode.
   return @($Value)
 }
 
@@ -181,7 +174,9 @@ while ($true) {
   $s4A = Extract-S4Entries -Summaries $sumA
   $s4B = Extract-S4Entries -Summaries $sumB
 
-  if ($s4A.Count -gt 0 -or $s4B.Count -gt 0) {
+  $s4ACount = @(ConvertTo-Array -Value $s4A).Count
+  $s4BCount = @(ConvertTo-Array -Value $s4B).Count
+  if ($s4ACount -gt 0 -or $s4BCount -gt 0) {
     $hasS4 = $true
     break
   }
@@ -196,10 +191,12 @@ while ($true) {
 
 $waitedSec = [int]((Get-Date) - $startPoll).TotalSeconds
 
-Write-Host "[debug] threadA summaries.s4 (count=$($s4A.Count), keys=$(Get-ObjectKeys -Obj $sumA)):"
+$s4ACount = @(ConvertTo-Array -Value $s4A).Count
+$s4BCount = @(ConvertTo-Array -Value $s4B).Count
+Write-Host "[debug] threadA summaries.s4 (count=$s4ACount, keys=$(Get-ObjectKeys -Obj $sumA)):"
 $s4A | ConvertTo-Json -Depth 50
 
-Write-Host "`n[debug] threadB summaries.s4 (count=$($s4B.Count), keys=$(Get-ObjectKeys -Obj $sumB)):"
+Write-Host "`n[debug] threadB summaries.s4 (count=$s4BCount, keys=$(Get-ObjectKeys -Obj $sumB)):"
 $s4B | ConvertTo-Json -Depth 50
 
 $s4TextA = Get-LatestS4Text -S4Entries $s4A
