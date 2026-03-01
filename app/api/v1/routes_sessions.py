@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session as OrmSession
 from app.db.session import SessionLocal
 from app.db.models import SummaryS4, SummaryS60
 from app.db.models import Session as ChatSession
+from app.services.summarizer import get_recent_debug_events
 
 router = APIRouter()
 
@@ -36,6 +37,14 @@ def get_summaries(session_id: str, db: OrmSession = Depends(get_db)):
             "summary": json.loads(r.summary_json),
             "created_at": r.created_at.isoformat()
         } for r in s60],
+    }
+
+
+@router.get("/sessions/{session_id}/summaries/debug")
+def get_summaries_debug(session_id: str, limit: int = 80):
+    return {
+        "session_id": session_id,
+        "events": get_recent_debug_events(session_id=session_id, limit=limit),
     }
 
 @router.post("/sessions/{session_id}/proactive/enable")
