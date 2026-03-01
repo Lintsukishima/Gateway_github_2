@@ -119,6 +119,11 @@ def _truncate_preview(value: Any, *, limit: int = 220) -> str:
     return text[:limit]
 
 
+def _truncate_hex_bytes(value: Any, *, limit_bytes: int = 120) -> str:
+    text = value if isinstance(value, str) else str(value)
+    return text.encode("utf-8", errors="replace")[:limit_bytes].hex()
+
+
 def _summary_debug_snapshot(obj: Dict[str, Any]) -> Dict[str, Any]:
     snapshot: Dict[str, Any] = {}
     for field in ("goal", "state", "open_loops", "constraints", "tone_notes"):
@@ -300,6 +305,7 @@ def call_llm_json(
     api_key: str,
     temperature: float = 0.2,
     timeout_s: int = 45,
+    session_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """调用 OpenAI-compatible 的 /chat/completions，要求返回 JSON。
 
@@ -385,21 +391,32 @@ def call_llm_json(
         )
         raise RuntimeError("LLM endpoint returned invalid JSON payload") from e
 
-    content = (
-        data.get("choices", [{}])[0]
-        .get("message", {})
-        .get("content", "")
-        .strip()
-    )
-    if not content:
-        raise RuntimeError(f"LLM empty content: {data}")
+    choices = data.get("choices") if isinstance(data, dict) else None
+    first_choice = choices[0] if isinstance(choices, list) and choices else {}
+    message_obj = first_choice.get("message") if isinstance(first_choice, dict) else {}
+    content_raw = message_obj.get("content") if isinstance(message_obj, dict) else ""
+    content = content_raw if isinstance(content_raw, str) else str(content_raw or "")
+    content = content.strip()
 
-    # 有些实现会把 JSON 包在 ```json``` 里
     if content.startswith("```"):
         content = content.strip("`")
         content = content.replace("json\n", "", 1).strip()
 
     repaired_content = _maybe_repair_mojibake_text(content)
+    _push_debug_event(
+        {
+            "stage": "call_llm_json.message_content",
+            "session_id": session_id,
+            "content_raw_preview_240": _truncate_preview(content, limit=240),
+            "content_raw_hex_120b": _truncate_hex_bytes(content, limit_bytes=120),
+            "content_repaired_preview_240": _truncate_preview(repaired_content, limit=240),
+            "content_repaired_hex_120b": _truncate_hex_bytes(repaired_content, limit_bytes=120),
+            "raw_vs_repaired_changed": repaired_content != content,
+        }
+    )
+
+    if not content:
+        raise RuntimeError(f"LLM empty content: {data}")
     if repaired_content != content:
         logger.warning(
             "LLM content mojibake repaired before JSON parse preview_before=%r preview_after=%r",
@@ -552,6 +569,7 @@ def _summarize_s4_with_debug_events(
         base_url=base_url,
         api_key=api_key,
         temperature=0.2,
+        session_id=session_id,
     )
     _push_debug_event(
         {
