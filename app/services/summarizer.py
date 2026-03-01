@@ -114,6 +114,25 @@ def _safe_json_loads(s: Optional[str]) -> Optional[Dict[str, Any]]:
         return {"_raw": s}
 
 
+def _truncate_preview(value: Any, *, limit: int = 220) -> str:
+    text = value if isinstance(value, str) else str(value)
+    return text[:limit]
+
+
+def _summary_debug_snapshot(obj: Dict[str, Any]) -> Dict[str, Any]:
+    snapshot: Dict[str, Any] = {}
+    for field in ("goal", "state", "open_loops", "constraints", "tone_notes"):
+        raw = obj.get(field, "")
+        if isinstance(raw, list):
+            joined = " | ".join(str(x) for x in raw)
+        else:
+            joined = str(raw)
+        preview = _truncate_preview(joined)
+        snapshot[f"{field}_preview"] = preview
+        snapshot[f"{field}_mojibake_score"] = _mojibake_score(preview)
+    return snapshot
+
+
 def _count_cjk_chars(s: str) -> int:
     return sum(1 for ch in s if "一" <= ch <= "鿿")
 
@@ -466,6 +485,106 @@ def _summarize_with_optional_llm(transcript: str, *, level: str) -> Dict[str, An
     return _repair_mojibake_in_obj(sanitized_obj)
 
 
+def _summarize_s4_with_debug_events(
+    transcript: str,
+    *,
+    session_id: str,
+    to_turn: int,
+) -> Dict[str, Any]:
+    """S4 专用总结流程，拆分 raw/sanitize/repair 三阶段并记录事件。"""
+
+    base_url = os.getenv("SUMMARIZER_BASE_URL", "").strip()
+    api_key = os.getenv("SUMMARIZER_API_KEY", "").strip()
+    model = os.getenv("SUMMARIZER_MODEL", "").strip() or "gpt-4o-mini"
+
+    if not base_url or not api_key:
+        fallback = _default_summary_schema()
+        _push_debug_event(
+            {
+                "stage": "summary_from_llm_raw",
+                "session_id": session_id,
+                "to_turn": to_turn,
+                **_summary_debug_snapshot(fallback),
+            }
+        )
+        _push_debug_event(
+            {
+                "stage": "summary_after_sanitize",
+                "session_id": session_id,
+                "to_turn": to_turn,
+                **_summary_debug_snapshot(fallback),
+            }
+        )
+        _push_debug_event(
+            {
+                "stage": "summary_after_repair",
+                "session_id": session_id,
+                "to_turn": to_turn,
+                **_summary_debug_snapshot(fallback),
+            }
+        )
+        return fallback
+
+    system = (
+        "你是会话总结器。你必须严格基于对话中的『显式文本』提取信息，禁止推断、禁止脑补、禁止编造。"
+        "只输出 JSON 对象，不要输出任何多余文字。"
+        "字段必须包含：goal, state, open_loops(list), constraints(list), tone_notes(list)。\n\n"
+        "硬规则：\n"
+        "1) goal：只能写对话里出现过的明确目标/意图；如果用户只是表达情绪或陈述事实，不要写成‘寻求帮助/求助/想让对方做X’，除非用户明确提出请求。\n"
+        "2) state：只能写明确发生过的进展；不要写‘对方愿意提供帮助/已确认…’，除非对话里有清晰承诺或确认。\n"
+        "3) open_loops/constraints：只列出对话中明确未解决的问题/明确限制；不要新增‘具体方案’这类你自己设定的任务。\n"
+        "4) tone_notes：只写非常短的语气标签，如‘关心/轻松/焦急’。\n"
+        "5) 如果信息不足，宁可写‘无明显推进/未提及’，不要编造。"
+    )
+
+    user = (
+        "请对下面对话做短期总结，输出 JSON。\n"
+        "注意：不要使用‘寻求经济帮助/请求资助/对方愿意帮忙’等推断性措辞，除非原文明确提出。"
+        "\n\n--- 对话 ---\n"
+        f"{transcript}\n"
+        "--- 结束 ---"
+    )
+
+    raw_obj = call_llm_json(
+        system=system,
+        user=user,
+        model=model,
+        base_url=base_url,
+        api_key=api_key,
+        temperature=0.2,
+    )
+    _push_debug_event(
+        {
+            "stage": "summary_from_llm_raw",
+            "session_id": session_id,
+            "to_turn": to_turn,
+            **_summary_debug_snapshot(raw_obj),
+        }
+    )
+
+    sanitized_obj = _sanitize_summary(transcript, raw_obj)
+    _push_debug_event(
+        {
+            "stage": "summary_after_sanitize",
+            "session_id": session_id,
+            "to_turn": to_turn,
+            **_summary_debug_snapshot(sanitized_obj),
+        }
+    )
+
+    repaired_obj = _repair_mojibake_in_obj(sanitized_obj)
+    _push_debug_event(
+        {
+            "stage": "summary_after_repair",
+            "session_id": session_id,
+            "to_turn": to_turn,
+            **_summary_debug_snapshot(repaired_obj),
+        }
+    )
+
+    return repaired_obj
+
+
 def _build_scope_query(
     db: Session,
     *,
@@ -602,7 +721,11 @@ def run_s4(
         return {"skipped": True, "reason": "exists", "to_turn": to_turn}
 
     transcript = _render_transcript(msgs)
-    summary_obj = _summarize_with_optional_llm(transcript, level="短期")
+    summary_obj = _summarize_s4_with_debug_events(
+        transcript,
+        session_id=session_id,
+        to_turn=to_turn,
+    )
     logger.debug(
         "S4 summary preview before persist session_id=%s thread_id=%s to_turn=%s summary=%r",
         session_id,
