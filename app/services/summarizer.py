@@ -139,7 +139,9 @@ def _summary_debug_snapshot(obj: Dict[str, Any]) -> Dict[str, Any]:
             joined = str(raw)
         preview = _truncate_preview(joined)
         snapshot[f"{field}_preview"] = preview
+        snapshot[f"{field}_hex_120b"] = _truncate_hex_bytes(joined, limit_bytes=120)
         snapshot[f"{field}_mojibake_score"] = _mojibake_score(preview)
+        snapshot[f"{field}_mojibake_markers_hit"] = _mojibake_markers_hit(preview)
     return snapshot
 
 
@@ -155,9 +157,34 @@ def _strip_ctrl(s: str) -> str:
 def _mojibake_score(text: str) -> int:
     if not text:
         return 0
-    # 兼容两边：常见“UTF-8 被按 latin-1/cp1252 解码”污染标记 + 控制符噪声
-    markers = ("Ã", "Â", "æ", "ä", "å", "ç", "ð", "\u0085", "\u009d", "\u009f")
-    return sum(text.count(m) for m in markers)
+    # 兼容两边：常见“UTF-8 被按 latin-1/cp1252 解码”污染标记 + 控制符噪声 + 异常拉丁串
+    marker_chars = ("Ã", "Â", "æ", "å", "è", "ç", "ä", "ð")
+    marker_hits = sum(text.count(m) for m in marker_chars)
+    ctrl_hits = _ctrl_char_count(text)
+    bad_latin_runs = _bad_latin_run_count(text)
+    return marker_hits + ctrl_hits + bad_latin_runs
+
+
+def _mojibake_markers_hit(text: str) -> List[str]:
+    if not text:
+        return []
+
+    hits: List[str] = []
+    marker_chars = ("Ã", "Â", "æ", "å", "è", "ç", "ä", "ð")
+    for marker in marker_chars:
+        count = text.count(marker)
+        if count > 0:
+            hits.append(f"char:{marker}x{count}")
+
+    ctrl_hits = _ctrl_char_count(text)
+    if ctrl_hits > 0:
+        hits.append(f"range:U+0080-U+009Fx{ctrl_hits}")
+
+    bad_latin_runs = _bad_latin_run_count(text)
+    if bad_latin_runs > 0:
+        hits.append(f"pattern:bad_latin_runsx{bad_latin_runs}")
+
+    return hits
 
 
 def _ctrl_char_count(text: str) -> int:
@@ -165,7 +192,7 @@ def _ctrl_char_count(text: str) -> int:
 
 
 def _bad_latin_run_count(text: str) -> int:
-    bad_chars = {"æ", "å", "ç", "Ã", "Â"}
+    bad_chars = {"æ", "å", "è", "ç", "Ã", "Â"}
     run_count = 0
     in_run = False
     for ch in text:
